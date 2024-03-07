@@ -1,0 +1,1 @@
+codetoanalyze/java/pulse/taint/field/NonStaticField.java, NonStaticField.instanceFieldBad():void, 2, TAINT_ERROR, no_bucket, ERROR, [source of the taint here: the field `sourceField` with kind `SemanticConflict`,is stored in the field `sinkField` with kind `SemanticConflict`], source: sourceField, sink: sinkField, tainted expression: this->secret
