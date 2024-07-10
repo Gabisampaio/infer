@@ -19,15 +19,49 @@ type t =
   | LithoRequiredProps
   | Pulse
   | Purity
-  | Quandary
   | RacerD
   | ScopeLeakage
   | SIOF
   | Lineage
   | LineageShape
   | Starvation
-  | Nullsafe
-  | Uninit
-[@@deriving variants]
+[@@deriving compare, equal, hash, show, variants]
 
 let database_fields = List.map ~f:fst Variants.descriptions
+
+let to_checker payload_id : Checker.t =
+  match payload_id with
+  | AnnotMap ->
+      AnnotationReachability
+  | Biabduction ->
+      Biabduction
+  | BufferOverrunAnalysis ->
+      BufferOverrunAnalysis
+  | BufferOverrunChecker ->
+      BufferOverrunChecker
+  | ConfigImpactAnalysis ->
+      ConfigImpactAnalysis
+  | Cost ->
+      Cost
+  | DisjunctiveDemo ->
+      DisjunctiveDemo
+  | LabResourceLeaks ->
+      ResourceLeakLabExercise
+  | LithoRequiredProps ->
+      LithoRequiredProps
+  | Pulse ->
+      Pulse
+  | Purity ->
+      PurityAnalysis
+  | RacerD ->
+      RacerD
+  | ScopeLeakage ->
+      ScopeLeakage
+  | SIOF ->
+      SIOF
+  | Lineage ->
+      Lineage
+  | LineageShape ->
+      LineageShape
+  | Starvation ->
+      Starvation

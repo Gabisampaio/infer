@@ -29,6 +29,8 @@ val __erlang_greater : Procname.t
 
 val __erlang_greater_or_equal : Procname.t
 
+val __erlang_error_badgenerator : Procname.t
+
 val __erlang_error_badkey : Procname.t
 
 val __erlang_error_badmatch : Procname.t
@@ -41,6 +43,8 @@ val __erlang_error_badreturn : Procname.t
 (** Not a runtime error in Erlang. It means that the actual type disagrees with the spec. *)
 
 val __erlang_error_case_clause : Procname.t
+
+val __erlang_error_else_clause : Procname.t
 
 val __erlang_error_function_clause : Procname.t
 
@@ -63,6 +67,10 @@ val __erlang_make_map : Procname.t
 val __erlang_make_str_const : Procname.t
 
 val __erlang_make_bitstring : Procname.t
+
+val __erlang_map_to_list : Procname.t
+(** This is an internal function we use for map generators, not to be confused with maps:to_list/1
+    from OTP library. *)
 
 val __erlang_receive : Procname.t
 
@@ -93,6 +101,10 @@ val __atomic_nand_fetch : Procname.t
 val __c11_atomic_fetch_max : Procname.t
 
 val __c11_atomic_fetch_min : Procname.t
+
+val __call_objc_block : Procname.t
+
+val __call_c_function_ptr : Procname.t
 
 val __opencl_atomic_fetch_max : Procname.t
 

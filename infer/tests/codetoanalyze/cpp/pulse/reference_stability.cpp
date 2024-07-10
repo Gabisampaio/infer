@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
 #include <initializer_list>
 #include <unordered_map>
 #include <utility>
@@ -176,15 +177,17 @@ struct F14BasicMap {
 
   mapped_type& operator[](key_type&& key);
 
+  size_type count(key_type const& key) const;
+
   F14HashToken prehash(key_type const& key) const;
 
   iterator find(key_type const& key);
-
   const_iterator find(key_type const& key) const;
-
   iterator find(F14HashToken const& token, key_type const& key);
-
   const_iterator find(F14HashToken const& token, key_type const& key) const;
+
+  bool contains(key_type const& key) const;
+  bool contains(F14HashToken const& token, key_type const& key) const;
 
   std::pair<iterator, iterator> equal_range(key_type const& key);
 
@@ -256,6 +259,9 @@ struct F14FastMap : public std::conditional<
 // sizeof(std::pair<const BigPoint, T>) >= 24.
 struct BigPoint {
   std::uint64_t x, y, z;
+  friend BigPoint operator+(const BigPoint& a, const BigPoint& b) {
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+  }
   friend bool operator==(const BigPoint& a, const BigPoint& b);
 };
 
@@ -419,6 +425,13 @@ void insert_range_bad(const std::initializer_list<std::pair<int, int>>& list) {
   const auto valueCopy = valueRef;
 }
 
+void insert_range_from_map_bad(const folly::F14FastMap<int, int>& other) {
+  folly::F14FastMap<int, int> map = {{1, 1}, {2, 4}, {3, 9}};
+  const auto& valueRef = map.at(1);
+  map.insert(other.begin(), other.end());
+  const auto valueCopy = valueRef;
+}
+
 void folly_fastmap_insert_or_assign_bad() {
   folly::F14FastMap<int, int> map = {{1, 1}, {2, 4}, {3, 9}};
   const auto& valueRef = map.at(1);
@@ -538,11 +551,20 @@ void folly_fastmap_erase_bad_FN() {
   const auto valueCopy = valueRef;
 }
 
-void folly_fastmap_swap_bad_FN() {
+void folly_fastmap_swap_ok() {
   folly::F14FastMap<int, int> map = {{1, 1}, {2, 4}, {3, 9}};
   folly::F14FastMap<int, int> other;
   const auto& valueRef = map.at(1);
-  map.swap(other);
+  map.swap(other); // valueRef now valid in other.
+  const auto valueCopy = valueRef;
+}
+
+void folly_fastmap_swap_bad() {
+  folly::F14FastMap<int, int> map = {{1, 1}, {2, 4}, {3, 9}};
+  folly::F14FastMap<int, int> other;
+  const auto& valueRef = map.at(1);
+  map.swap(other); // valueRef now valid in other.
+  other.clear(); // valueRef now invalid.
   const auto valueCopy = valueRef;
 }
 
@@ -624,7 +646,7 @@ void folly_fastmap_cbegin_bad(folly::F14FastMap<int, int>& map) {
   const auto keyCopy = it->first;
 }
 
-void folly_fastmap_iterator_increment_bad(folly::F14FastMap<int, int>& map) {
+void folly_fastmap_iterator_increment_bad_FN(folly::F14FastMap<int, int>& map) {
   auto it = map.begin();
   ++it;
   const auto& valueRef = it->second;
@@ -667,4 +689,105 @@ void use_emplace_iterator_bad(folly::F14FastMap<int, int>& map) {
   // Copy here is fine, iterator is invalid but we are not accessing it.
   const auto copy = it;
   const auto value = copy->second;
+}
+
+void multiple_lookups_existing_key_ok(folly::F14FastMap<int, int>& map) {
+  const auto& valueRef = map.at(71);
+  const auto key = 13;
+  if (map.contains(key)) {
+    map[key] = 17;
+    map[key] = 31;
+    map[key] = 71;
+  }
+  const auto valueCopy = valueRef;
+}
+
+void known_existing_map_key_count_ok(folly::F14FastMap<int, int>& map) {
+  const auto& valueRef = map.at(71);
+  const auto key = 13;
+  if (map.count(key) != 0) {
+    map[key] = std::max(map[key], 17);
+  }
+  const auto valueCopy = valueRef;
+}
+
+void known_existing_map_key_contains_ok(folly::F14FastMap<int, int>& map) {
+  const auto& valueRef = map.at(71);
+  const auto key = 13;
+  if (map.contains(key)) {
+    map[key] = std::max(map[key], 17);
+  }
+  const auto valueCopy = valueRef;
+}
+
+void known_existing_map_key_find_ok(folly::F14FastMap<int, int>& map) {
+  const auto& valueRef = map.at(71);
+  const auto key = 13;
+  if (map.find(key) != map.end()) {
+    map[key] = std::max(map[key], 17);
+  }
+  const auto valueCopy = valueRef;
+}
+
+void double_lookup_not_found_bad_FN(folly::F14FastMap<int, int>& map) {
+  const auto& valueRef = map.at(71);
+  const auto key = 13;
+  if (!map.contains(key)) {
+    map[key] = 17;
+  }
+  const auto valueCopy = valueRef;
+}
+
+void known_existing_map_key_literal_ok_FP(folly::F14FastMap<int, int>& map) {
+  const auto& valueRef = map.at(71);
+  if (map.contains(13)) {
+    map[13] = std::max(map[13], 17);
+  }
+  const auto valueCopy = valueRef;
+}
+
+void delete_in_loop_ok(folly::F14FastMap<int, int*>& map) {
+  for (auto& it : map) {
+    delete it.second;
+  }
+}
+
+void right_sequenced_before_left_ok(folly::F14FastMap<int, int>& map) {
+  // > The assignment operator (=) and the compound assignment operators all
+  // > group right-to-left. The right operand is sequenced before the left
+  // > operand.
+  // -- https://wg21.link/N4950, section 7.6.19 [expr.ass].
+  map[13] = map[71] / 31;
+}
+
+void right_before_left_compound_ok(folly::F14FastMap<int, int>& map) {
+  map[13] += map[71] / 31;
+}
+
+// This only seems to be a false negative for integral types.
+void unsafe_assign_bad_FN(folly::F14FastMap<int, int>& map) {
+  // The LHS evaluation can invalidate the RHS reference.
+  map[13] = map[71];
+}
+
+void unsafe_operation_bad_FN(folly::F14FastMap<int, int>& map) {
+  const auto result = map[13] * map[71];
+}
+
+void unsafe_assign_struct_bad(folly::F14FastMap<int, BigPoint>& map) {
+  map[13] = map[71];
+}
+
+void unsafe_operation_struct_bad(folly::F14FastMap<int, BigPoint>& map) {
+  const auto result = map[13] + map[71];
+}
+
+int mul(const int& a, const int& b) { return a * b; }
+
+void unsafe_function_call_bad(folly::F14FastMap<int, int>& map) {
+  const auto result = mul(map[13], map[71]);
+}
+
+void unsafe_function_call_lambda_bad(folly::F14FastMap<int, int>&& map) {
+  [&]() { const auto result = mul(map[13], map[71]); };
 }

@@ -14,10 +14,11 @@ open PulseDomainInterface
 (* Is nullptr dereference issue in Java class annotated with [@Nullsafe] *)
 let is_nullptr_dereference_in_nullsafe_class tenv ~is_nullptr_dereference jn =
   is_nullptr_dereference
-  && match NullsafeMode.of_java_procname tenv jn with Default -> false | Local _ | Strict -> true
+  && match NullsafeMode.of_java_procname tenv jn with Default -> false | Local | Strict -> true
 
 
-let report tenv ~is_suppressed ~latent proc_desc err_log diagnostic =
+let report {InterproceduralAnalysis.tenv; proc_desc; err_log} ~is_suppressed ~latent
+    (diagnostic : Diagnostic.t) =
   let open Diagnostic in
   if is_suppressed && not Config.pulse_report_issues_for_tests then ()
   else
@@ -33,6 +34,18 @@ let report tenv ~is_suppressed ~latent proc_desc err_log diagnostic =
       else []
     in
     let extras =
+      let transitive_callees, transitive_missed_captures =
+        let to_jsonbug_missed_capture class_name =
+          {Jsonbug_t.class_name= Typ.Name.name class_name}
+        in
+        match diagnostic with
+        | TransitiveAccess {transitive_callees; transitive_missed_captures} ->
+            ( TransitiveInfo.Callees.to_jsonbug_transitive_callees transitive_callees
+            , Typ.Name.Set.elements transitive_missed_captures
+              |> List.map ~f:to_jsonbug_missed_capture )
+        | _ ->
+            ([], [])
+      in
       let copy_type = get_copy_type diagnostic |> Option.map ~f:Typ.to_string in
       let taint_source, taint_sink =
         let proc_name_of_taint taint_item =
@@ -80,13 +93,13 @@ let report tenv ~is_suppressed ~latent proc_desc err_log diagnostic =
         | _ ->
             None
       in
-      Jsonbug_t.
-        { cost_polynomial= None
-        ; cost_degree= None
-        ; nullsafe_extra= None
-        ; copy_type
-        ; config_usage_extra
-        ; taint_extra }
+      { Jsonbug_t.cost_polynomial= None
+      ; cost_degree= None
+      ; copy_type
+      ; config_usage_extra
+      ; taint_extra
+      ; transitive_callees
+      ; transitive_missed_captures }
     in
     (* [Diagnostic.get_issue_type] wrapper to report different type of issue for
        nullptr dereferences in Java classes annotated with @Nullsafe if requested *)
@@ -110,9 +123,8 @@ let report tenv ~is_suppressed ~latent proc_desc err_log diagnostic =
       ~extras ?suggestion Pulse issue_type message
 
 
-let report_latent_issue tenv proc_desc err_log latent_issue ~is_suppressed =
-  LatentIssue.to_diagnostic latent_issue
-  |> report tenv ~latent:true ~is_suppressed proc_desc err_log
+let report_latent_issue analysis_data latent_issue ~is_suppressed =
+  LatentIssue.to_diagnostic latent_issue |> report analysis_data ~latent:true ~is_suppressed
 
 
 (* skip reporting for constant dereference (eg null dereference) if the source of the null value is
@@ -147,11 +159,15 @@ let is_constant_deref_without_invalidation_diagnostic (diagnostic : Diagnostic.t
   | ConfigUsage _
   | ConstRefableParameter _
   | CSharpResourceLeak _
+  | DynamicTypeMismatch _
   | ErlangError _
   | TransitiveAccess _
   | JavaResourceLeak _
+  | HackCannotInstantiateAbstractClass _
   | HackUnawaitedAwaitable _
+  | HackUnfinishedBuilder _
   | MemoryLeak _
+  | MutualRecursionCycle _
   | ReadonlySharedPtrParameter _
   | ReadUninitialized _
   | RetainCycle _
@@ -163,13 +179,22 @@ let is_constant_deref_without_invalidation_diagnostic (diagnostic : Diagnostic.t
       is_constant_deref_without_invalidation invalidation access_trace
 
 
+let is_optional_empty diagnostic =
+  match (diagnostic : Diagnostic.t) with
+  | AccessToInvalidAddress {invalidation= OptionalEmpty} ->
+      true
+  | _ ->
+      false
+
+
 (* Skip reporting nullptr dereferences in Java classes annotated with [@Nullsafe] if requested *)
 let should_skip_reporting_nullptr_dereference_in_nullsafe_class tenv ~is_nullptr_dereference jn =
   (not Config.pulse_nullsafe_report_npe)
   && is_nullptr_dereference_in_nullsafe_class tenv ~is_nullptr_dereference jn
 
 
-let is_suppressed tenv proc_desc ~is_nullptr_dereference ~is_constant_deref_without_invalidation =
+let is_suppressed tenv proc_desc ~is_nullptr_dereference ~is_constant_deref_without_invalidation
+    ~is_optional_empty =
   if is_constant_deref_without_invalidation then (
     L.d_printfln ~color:Red
       "Dropping error: constant dereference with no invalidation in the access trace" ;
@@ -178,13 +203,13 @@ let is_suppressed tenv proc_desc ~is_nullptr_dereference ~is_constant_deref_with
     match Procdesc.get_proc_name proc_desc with
     | Procname.Java jn when is_nullptr_dereference ->
         should_skip_reporting_nullptr_dereference_in_nullsafe_class tenv ~is_nullptr_dereference jn
-    | _ ->
-        false
+    | pname ->
+        Procname.is_cpp_lambda pname && is_optional_empty
 
 
-let summary_of_error_post tenv proc_desc location mk_error astate =
+let summary_of_error_post proc_desc location mk_error astate =
   match
-    AbductiveDomain.Summary.of_post tenv
+    AbductiveDomain.Summary.of_post
       (Procdesc.get_proc_name proc_desc)
       (Procdesc.get_attributes proc_desc)
       location astate
@@ -194,8 +219,8 @@ let summary_of_error_post tenv proc_desc location mk_error astate =
       ( Error (`MemoryLeak (summary, _, _, _, _))
       | Error (`JavaResourceLeak (summary, _, _, _, _))
       | Error (`HackUnawaitedAwaitable (summary, _, _, _))
-      | Error (`CSharpResourceLeak (summary, _, _, _, _)) )
-  | Sat (Error (`RetainCycle (summary, _, _, _, _, _))) ->
+      | Error (`HackUnfinishedBuilder (summary, _, _, _, _))
+      | Error (`CSharpResourceLeak (summary, _, _, _, _)) ) ->
       (* ignore potential memory leaks: error'ing in the middle of a function will typically produce
          spurious leaks *)
       Sat (mk_error summary)
@@ -209,17 +234,19 @@ let summary_of_error_post tenv proc_desc location mk_error astate =
       Unsat
 
 
-let summary_error_of_error tenv proc_desc location (error : AccessResult.error) : _ SatUnsat.t =
+let summary_error_of_error proc_desc location (error : AccessResult.error) : _ SatUnsat.t =
   match error with
   | WithSummary (error, summary) ->
       Sat (error, summary)
-  | PotentialInvalidAccess {astate} | ReportableError {astate} ->
-      summary_of_error_post tenv proc_desc location (fun summary -> (error, summary)) astate
+  | PotentialInvalidAccess {astate}
+  | PotentialInvalidSpecializedCall {astate}
+  | ReportableError {astate} ->
+      summary_of_error_post proc_desc location (fun summary -> (error, summary)) astate
 
 
 (* the access error and summary must come from [summary_error_of_error] *)
-let report_summary_error tenv proc_desc err_log ((access_error : AccessResult.error), summary) :
-    _ ExecutionDomain.base_t option =
+let report_summary_error ({InterproceduralAnalysis.tenv; proc_desc} as analysis_data)
+    ((access_error : AccessResult.error), summary) : _ ExecutionDomain.base_t option =
   match access_error with
   | PotentialInvalidAccess {address; must_be_valid} ->
       let invalidation = Invalidation.ConstantDereference IntLit.zero in
@@ -229,11 +256,11 @@ let report_summary_error tenv proc_desc err_log ((access_error : AccessResult.er
       in
       let is_suppressed =
         is_suppressed tenv proc_desc ~is_nullptr_dereference:true
-          ~is_constant_deref_without_invalidation
+          ~is_constant_deref_without_invalidation ~is_optional_empty:false
       in
       if is_suppressed then L.d_printfln "suppressed error" ;
       if Config.pulse_report_latent_issues then
-        report tenv ~latent:true ~is_suppressed proc_desc err_log
+        report analysis_data ~latent:true ~is_suppressed
           (AccessToInvalidAddress
              { calling_context= []
              ; invalid_address= address
@@ -243,6 +270,8 @@ let report_summary_error tenv proc_desc err_log ((access_error : AccessResult.er
              ; access_trace
              ; must_be_valid_reason= snd must_be_valid } ) ;
       Some (LatentInvalidAccess {astate= summary; address; must_be_valid; calling_context= []})
+  | PotentialInvalidSpecializedCall {specialized_type; trace} ->
+      Some (LatentSpecializedTypeIssue {astate= summary; specialized_type; trace})
   | ReportableError {diagnostic} -> (
       let is_nullptr_dereference =
         match diagnostic with AccessToInvalidAddress _ -> true | _ -> false
@@ -250,31 +279,32 @@ let report_summary_error tenv proc_desc err_log ((access_error : AccessResult.er
       let is_constant_deref_without_invalidation =
         is_constant_deref_without_invalidation_diagnostic diagnostic
       in
+      let is_optional_empty = is_optional_empty diagnostic in
       let is_suppressed =
         is_suppressed tenv proc_desc ~is_nullptr_dereference ~is_constant_deref_without_invalidation
+          ~is_optional_empty
       in
       match LatentIssue.should_report summary diagnostic with
       | `ReportNow ->
           if is_suppressed then L.d_printfln "ReportNow suppressed error" ;
-          report tenv ~latent:false ~is_suppressed proc_desc err_log diagnostic ;
+          report analysis_data ~latent:false ~is_suppressed diagnostic ;
           if Diagnostic.aborts_execution diagnostic then Some (AbortProgram summary) else None
       | `DelayReport latent_issue ->
           if is_suppressed then L.d_printfln "DelayReport suppressed error" ;
           if Config.pulse_report_latent_issues then
-            report_latent_issue tenv ~is_suppressed proc_desc err_log latent_issue ;
+            report_latent_issue analysis_data ~is_suppressed latent_issue ;
           Some (LatentAbortProgram {astate= summary; latent_issue}) )
   | WithSummary _ ->
       (* impossible thanks to prior application of [summary_error_of_error] *)
       assert false
 
 
-let report_error tenv proc_desc err_log location access_error =
+let report_error ({InterproceduralAnalysis.proc_desc} as analysis_data) location access_error =
   let open SatUnsat.Import in
-  summary_error_of_error tenv proc_desc location access_error
-  >>| report_summary_error tenv proc_desc err_log
+  summary_error_of_error proc_desc location access_error >>| report_summary_error analysis_data
 
 
-let report_errors tenv proc_desc err_log location errors =
+let report_errors analysis_data location errors =
   let open SatUnsat.Import in
   List.rev errors
   |> List.fold ~init:(Sat None) ~f:(fun sat_result error ->
@@ -282,17 +312,17 @@ let report_errors tenv proc_desc err_log location errors =
          | Unsat | Sat (Some _) ->
              sat_result
          | Sat None ->
-             report_error tenv proc_desc err_log location error )
+             report_error analysis_data location error )
 
 
-let report_exec_results tenv proc_desc err_log location results =
+let report_exec_results analysis_data location results =
   let results = PulseTaintOperations.dedup_reports results in
   List.filter_map results ~f:(fun exec_result ->
       match PulseResult.to_result exec_result with
       | Ok post ->
           Some post
       | Error errors -> (
-        match report_errors tenv proc_desc err_log location errors with
+        match report_errors analysis_data location errors with
         | Unsat ->
             L.d_printfln "UNSAT discovered during error reporting" ;
             None
@@ -307,13 +337,12 @@ let report_exec_results tenv proc_desc err_log location results =
             Some exec_state ) )
 
 
-let report_results tenv proc_desc err_log location results =
+let report_results analysis_data location results =
   let open PulseResult.Let_syntax in
   List.map results ~f:(fun result ->
       let+ astate = result in
       ExecutionDomain.ContinueProgram astate )
-  |> report_exec_results tenv proc_desc err_log location
+  |> report_exec_results analysis_data location
 
 
-let report_result tenv proc_desc err_log location result =
-  report_results tenv proc_desc err_log location [result]
+let report_result analysis_data location result = report_results analysis_data location [result]

@@ -9,7 +9,7 @@
 
 open! IStd
 module F = Format
-module YBU = Yojson.Basic.Util
+module YSU = Yojson.Safe.Util
 module L = Die
 open PolyVariantEqual
 
@@ -38,9 +38,34 @@ let strict_mode_env_var = "INFER_STRICT_MODE"
 let strict_mode = is_env_var_set strict_mode_env_var
 
 let warnf =
-  if strict_mode then fun fmt -> L.(die UserError) fmt
+  if strict_mode then fun fmt -> L.die UserError fmt
   else if not is_originator then fun fmt -> F.ifprintf F.err_formatter fmt
   else F.eprintf
+
+
+let log_deprecated_option source ~deprecated ~instead ~short_instead ~doc =
+  ( if is_originator then
+      let label =
+        match source with
+        | `CLI ->
+            "deprecated_option"
+        | `Inferconfig _ ->
+            "deprecated_option_inferconfig"
+      in
+      EarlyScubaLogging.log_message ~label ~message:deprecated ) ;
+  let pp_source fmt = function
+    | `CLI ->
+        ()
+    | `Inferconfig root ->
+        F.fprintf fmt " in %s/.inferconfig:" root
+  in
+  if String.is_empty instead then
+    warnf "WARNING:%a '-%s' is deprecated. Here is its documentation:@\n%s@." pp_source source
+      deprecated doc
+  else
+    warnf "WARNING:%a '-%s' is deprecated. Use '--%s'%s instead.@." pp_source source deprecated
+      instead
+      (if short_instead = "" then "" else Printf.sprintf " or '-%s'" short_instead)
 
 
 (** This is the subset of Arg.spec that we actually use. What's important is that all these specs
@@ -96,7 +121,7 @@ type desc =
   ; doc: string
   ; default_string: string
   ; spec: spec
-  ; decode_json: inferconfig_dir:string -> Yojson.Basic.t -> string list
+  ; decode_json: inferconfig_dir:string -> Yojson.Safe.t -> string list
         (** how to go from an option in the json config file to a list of command-line options *) }
 
 let dashdash ?short long =
@@ -231,22 +256,11 @@ let add parse_mode sections desc =
 
 let deprecate_desc parse_mode ~long ~short ~deprecated doc desc =
   let warn source =
-    let source_s =
-      match source with
-      | `CLI ->
-          ""
-      | `Inferconfig root ->
-          Printf.sprintf " in %s/.inferconfig:" root
-    in
     match parse_mode with
     | Javac | NoParse ->
         ()
-    | InferCommand when not (String.is_empty long) ->
-        warnf "WARNING:%s '-%s' is deprecated. Use '--%s'%s instead.@." source_s deprecated long
-          (if short = "" then "" else Printf.sprintf " or '-%s'" short)
     | InferCommand ->
-        warnf "WARNING:%s '-%s' is deprecated. Here is its documentation:@\n%s@." source_s
-          deprecated doc
+        log_deprecated_option source ~deprecated ~instead:long ~short_instead:short ~doc
   in
   let warn_then_f f x =
     warn `CLI ;
@@ -343,7 +357,7 @@ let json_expect ~flag ~expected ~inferconfig_dir ~f json =
   else (
     warnf "WARNING: in %s/.inferconfig for option '%s', use %s (found value '%s' instead).@."
       inferconfig_dir flag expected
-      (Yojson.Basic.pretty_to_string json) ;
+      (Yojson.Safe.pretty_to_string json) ;
     false )
 
 
@@ -372,12 +386,12 @@ let json_expect_string ~flag ~inferconfig_dir json =
 
 
 let float_json_decoder ~flag ~inferconfig_dir json =
-  if json_expect_float ~flag ~inferconfig_dir json then [flag; string_of_float (YBU.to_number json)]
+  if json_expect_float ~flag ~inferconfig_dir json then [flag; string_of_float (YSU.to_number json)]
   else []
 
 
 let int_json_decoder ~flag ~inferconfig_dir json =
-  if json_expect_int ~flag ~inferconfig_dir json then [flag; string_of_int (YBU.to_int json)]
+  if json_expect_int ~flag ~inferconfig_dir json then [flag; string_of_int (YSU.to_int json)]
   else []
 
 
@@ -386,19 +400,19 @@ let null_json_decoder ~flag ~inferconfig_dir json =
 
 
 let string_json_decoder ~flag ~inferconfig_dir json =
-  if json_expect_string ~flag ~inferconfig_dir json then [flag; YBU.to_string json] else []
+  if json_expect_string ~flag ~inferconfig_dir json then [flag; YSU.to_string json] else []
 
 
 let path_json_decoder ~flag ~inferconfig_dir json =
   let abs_path =
-    let path = YBU.to_string json in
+    let path = YSU.to_string json in
     if Filename.is_relative path then inferconfig_dir ^/ path else path
   in
   [flag; abs_path]
 
 
 let list_json_decoder json_decoder ~inferconfig_dir json =
-  List.concat (YBU.convert_each (json_decoder ~inferconfig_dir) json)
+  List.concat (YSU.convert_each (json_decoder ~inferconfig_dir) json)
 
 
 (* selects "--long" if not empty, or some non-empty "-deprecated" or "-short" *)
@@ -510,7 +524,7 @@ let mk_bool ?(deprecated_no = []) ?(default = false) ?(f = fun b -> b) ?(depreca
     mk ~long ?short ~deprecated ~default ?parse_mode ?in_help ~meta doc ~default_to_string
       ~mk_setter:(fun var _ -> var := f true)
       ~decode_json:(fun ~inferconfig_dir:_ json ->
-        [(if YBU.to_bool json then best_nonempty_enable else best_nonempty_disable)] )
+        [(if YSU.to_bool json then best_nonempty_enable else best_nonempty_disable)] )
       ~mk_spec
   in
   ignore
@@ -518,7 +532,7 @@ let mk_bool ?(deprecated_no = []) ?(default = false) ?(f = fun b -> b) ?(depreca
        ?in_help ~meta nodoc ~default_to_string
        ~mk_setter:(fun _ _ -> var := f false)
        ~decode_json:(fun ~inferconfig_dir:_ json ->
-         [(if YBU.to_bool json then best_nonempty_disable else best_nonempty_enable)] )
+         [(if YSU.to_bool json then best_nonempty_disable else best_nonempty_enable)] )
        ~mk_spec ) ;
   var
 
@@ -742,15 +756,15 @@ let mk_symbol_seq ?(default = []) ~symbols ~eq ?(deprecated = []) ~long ?short ?
     ~default_to_string:(fun syms -> String.concat ~sep:" " (List.map ~f:to_string syms))
     ~mk_setter:(fun var str_seq -> var := List.map ~f:of_string (String.split ~on:',' str_seq))
     ~decode_json:(fun ~inferconfig_dir:_ json ->
-      [dashdash long; String.concat ~sep:"," (YBU.convert_each YBU.to_string json)] )
+      [dashdash long; String.concat ~sep:"," (YSU.convert_each YSU.to_string json)] )
     ~mk_spec:(fun set -> String set)
 
 
 let mk_json ?(deprecated = []) ~long ?short ?parse_mode ?in_help ?(meta = "json") doc =
   mk ~deprecated ~long ?short ?parse_mode ?in_help ~meta doc ~default:(`List [])
-    ~default_to_string:Yojson.Basic.to_string
-    ~mk_setter:(fun var json -> var := Yojson.Basic.from_string json)
-    ~decode_json:(fun ~inferconfig_dir:_ json -> [dashdash long; Yojson.Basic.to_string json])
+    ~default_to_string:Yojson.Safe.to_string
+    ~mk_setter:(fun var json -> var := Yojson.Safe.from_string json)
+    ~decode_json:(fun ~inferconfig_dir:_ json -> [dashdash long; Yojson.Safe.to_string json])
     ~mk_spec:(fun set -> String set)
 
 
@@ -891,7 +905,8 @@ let mk_subcommand command ?on_unknown_arg:(on_unknown = `Reject) ~name ?deprecat
            ~decode_json:(fun ~inferconfig_dir:_ _ ->
              raise (Arg.Bad ("Bad option in config file: " ^ long)) )
            ~mk_setter:(fun _ _ ->
-             warnf "WARNING: '%s' is deprecated. Please use '%s' instead.@\n" (dashdash long) name ;
+             log_deprecated_option `CLI ~deprecated:("-" ^ long) ~instead:name ~short_instead:""
+               ~doc:"" ;
              switch () )
            ~mk_spec:(fun set -> Unit (fun () -> set "")) )
   | None ->
@@ -951,7 +966,7 @@ let decode_inferconfig_to_argv path =
         `Assoc []
   in
   let desc_list = List.Assoc.find_exn ~equal:equal_parse_mode parse_mode_desc_lists InferCommand in
-  let json_config = YBU.to_assoc json in
+  let json_config = YSU.to_assoc json in
   let inferconfig_dir = Filename.dirname path in
   let one_config_item result (key, json_val) =
     try
@@ -968,9 +983,9 @@ let decode_inferconfig_to_argv path =
     | Not_found_s _ | Caml.Not_found ->
         warnf "WARNING: while reading config file %s:@\nUnknown option %s@." path key ;
         result
-    | YBU.Type_error (msg, json) ->
+    | YSU.Type_error (msg, json) ->
         warnf "WARNING: while reading config file %s:@\nIll-formed value %s for option %s: %s@."
-          path (Yojson.Basic.to_string json) key msg ;
+          path (Yojson.Safe.to_string json) key msg ;
         result
   in
   List.fold ~f:one_config_item ~init:[] json_config
@@ -995,7 +1010,7 @@ let decode_env_to_argv env =
   String.split ~on:env_var_sep env |> List.filter ~f:(Fn.non String.is_empty)
 
 
-(** [prefix_before_rest (prefix @ \["--" :: rest\])] is [prefix] where "--" is not in [prefix]. *)
+(** [prefix_before_rest (prefix @ ["--" :: rest])] is [prefix] where "--" is not in [prefix]. *)
 let rev_prefix_before_rest args =
   let rec rev_prefix_before_rest_ rev_keep = function
     | [] | "--" :: _ ->
@@ -1005,6 +1020,9 @@ let rev_prefix_before_rest args =
   in
   rev_prefix_before_rest_ [] args
 
+
+(** environment variable used for the results dir of the originator process *)
+let infer_top_results_dir_env_var = "INFER_TOP_RESULTS_DIR"
 
 (** environment variable use to pass arguments from parent to child processes *)
 let args_env_var = "INFER_ARGS"
@@ -1101,7 +1119,8 @@ let parse ?config_file ~usage action initial_command =
          environment contributes to the length of the command to be run. If the environment + CLI is
          too big, running any command will fail with a cryptic "exit code 127" error. Use an argfile
          to prevent this from happening *)
-      let file = Filename.temp_file "args" "" in
+      let in_dir = Sys.getenv "TMPDIR" in
+      let file = Filename.temp_file ?in_dir "args" "" in
       Out_channel.with_file file ~f:(fun oc -> Out_channel.output_lines oc argv_to_export) ;
       if not !keep_args_file then Utils.unlink_file_on_exit file ;
       "@" ^ file )

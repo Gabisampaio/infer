@@ -6,6 +6,7 @@
  *)
 
 open! IStd
+module F = Format
 module L = Die
 
 type t =
@@ -15,13 +16,12 @@ type t =
   | BufferOverrunChecker
   | ConfigImpactAnalysis
   | Cost
-  | Datalog
   | DisjunctiveDemo
-  | Eradicate
   | FragmentRetainsView
-  | ImmutableCast
   | Impurity
   | InefficientKeysetIterator
+  | Lineage
+  | LineageShape
   | LithoRequiredProps
   | Liveness
   | LoopHoisting
@@ -30,19 +30,15 @@ type t =
   | Pulse
   | PurityAnalysis
   | PurityChecker
-  | Quandary
   | RacerD
   | ResourceLeakLabExercise
-  | ScopeLeakage
-  | SIOF
   | SILValidation
-  | Lineage
-  | LineageShape
+  | SIOF
+  | ScopeLeakage
   | SelfInBlock
   | Starvation
   | Topl
-  | Uninit
-[@@deriving equal, enumerate]
+[@@deriving compare, equal, enumerate]
 
 type support = NoSupport | ExperimentalSupport | Support
 
@@ -89,28 +85,31 @@ let config_unsafe checker =
   | AnnotationReachability ->
       { id= "annotation-reachability"
       ; kind= UserFacing {title= "Annotation Reachability"; markdown_body= ""}
-      ; support= mk_support_func ~clang:Support ~java:Support ()
+      ; support= mk_support_func ~java:Support ()
       ; short_documentation=
-          "Given a pair of source and sink annotation, e.g. `@PerformanceCritical` and \
-           `@Expensive`, this checker will warn whenever some method annotated with \
-           `@PerformanceCritical` calls, directly or indirectly, another method annotated with \
-           `@Expensive`"
+          "Given pairs of source and sink annotations, e.g. `@A` and `@B`, this checker will warn \
+           whenever some method annotated with `@A` calls, directly or indirectly, another method \
+           annotated with `@B`. Besides the custom pairs, it is also possible to enable some \
+           built-in checks, such as `@PerformanceCritical` reaching `@Expensive` or \
+           `@NoAllocation` reaching `new`. See flags starting with `--annotation-reachability`."
       ; cli_flags= Some {deprecated= []; show_in_help= true}
       ; enabled_by_default= false
       ; activates= [] }
   | Biabduction ->
       { id= "biabduction"
       ; kind=
-          UserFacing
+          UserFacingDeprecated
             { title= "Biabduction"
             ; markdown_body=
                 "Read more about its foundations in the [Separation Logic and Biabduction \
-                 page](separation-logic-and-bi-abduction)." }
+                 page](separation-logic-and-bi-abduction)."
+            ; deprecation_message=
+                "This has been replaced by Pulse and will be removed in the next release." }
       ; support= mk_support_func ~clang:Support ~java:Support ~csharp:Support ()
       ; short_documentation=
           "This analysis deals with a range of issues, many linked to memory safety."
       ; cli_flags= Some {deprecated= []; show_in_help= true}
-      ; enabled_by_default= true
+      ; enabled_by_default= false
       ; activates= [] }
   | BufferOverrunAnalysis ->
       { id= "bufferoverrun-analysis"
@@ -166,34 +165,12 @@ let config_unsafe checker =
       ; cli_flags= Some {deprecated= []; show_in_help= true}
       ; enabled_by_default= false
       ; activates= [BufferOverrunAnalysis; PurityAnalysis] }
-  | Datalog ->
-      { id= "datalog"
-      ; kind= UserFacing {title= "Datalog-based points-to analysis"; markdown_body= ""}
-      ; support= mk_support_func ~java:ExperimentalSupport ()
-      ; short_documentation= "Experimental datalog-based points-to analysis."
-      ; cli_flags= Some {deprecated= []; show_in_help= true}
-      ; enabled_by_default= false
-      ; activates= [] }
   | DisjunctiveDemo ->
       { id= "disjunctive-demo"
       ; kind= Internal
       ; support= mk_support_func ~clang:Support ()
       ; short_documentation= "Demo of the disjunctive domain, used for testing."
       ; cli_flags= Some {deprecated= []; show_in_help= false}
-      ; enabled_by_default= false
-      ; activates= [] }
-  | Eradicate ->
-      { id= "eradicate"
-      ; kind=
-          UserFacingDeprecated
-            { title= "Eradicate"
-            ; markdown_body= [%blob "./documentation/checkers/Eradicate.md"]
-            ; deprecation_message=
-                "Unmaintained and will be removed in the future. Consider using \
-                 [NullAway](https://github.com/uber/NullAway) as an alternative to Eradicate." }
-      ; support= mk_support_func ~java:Support ()
-      ; short_documentation= "The eradicate `@Nullable` checker for Java annotations."
-      ; cli_flags= Some {deprecated= []; show_in_help= true}
       ; enabled_by_default= false
       ; activates= [] }
   | FragmentRetainsView ->
@@ -208,23 +185,6 @@ let config_unsafe checker =
           "Detects when Android fragments are not explicitly nullified before becoming unreachable."
       ; cli_flags= Some {deprecated= []; show_in_help= true}
       ; enabled_by_default= true
-      ; activates= [] }
-  | ImmutableCast ->
-      { id= "immutable-cast"
-      ; kind=
-          UserFacingDeprecated
-            { title= "Immutable Cast"
-            ; markdown_body=
-                "Casts flagged by this checker are unsafe because calling mutation operations on \
-                 the cast objects will fail at runtime."
-            ; deprecation_message= "Unmaintained due to poor actionability of the reports." }
-      ; support= mk_support_func ~java:Support ()
-      ; short_documentation=
-          "Detection of object cast from immutable types to mutable types. For instance, it will \
-           detect casts from `ImmutableList` to `List`, `ImmutableMap` to `Map`, and \
-           `ImmutableSet` to `Set`."
-      ; cli_flags= Some {deprecated= []; show_in_help= true}
-      ; enabled_by_default= false
       ; activates= [] }
   | Impurity ->
       { id= "impurity"
@@ -313,10 +273,11 @@ let config_unsafe checker =
   | Pulse ->
       { id= "pulse"
       ; kind= UserFacing {title= "Pulse"; markdown_body= [%blob "./documentation/checkers/Pulse.md"]}
-      ; support= mk_support_func ~clang:Support ~java:Support ~erlang:ExperimentalSupport ()
-      ; short_documentation= "Memory and lifetime analysis."
+      ; support=
+          mk_support_func ~clang:Support ~java:Support ~erlang:ExperimentalSupport ~hack:Support ()
+      ; short_documentation= "General-purpose memory and value analysis engine."
       ; cli_flags= Some {deprecated= ["-ownership"]; show_in_help= true}
-      ; enabled_by_default= false
+      ; enabled_by_default= true
       ; activates= [] }
   | PurityAnalysis ->
       { id= "purity-analysis"
@@ -336,19 +297,6 @@ let config_unsafe checker =
       ; cli_flags= Some {deprecated= []; show_in_help= true}
       ; enabled_by_default= false
       ; activates= [PurityAnalysis] }
-  | Quandary ->
-      { id= "quandary"
-      ; kind=
-          UserFacing
-            {title= "Quandary"; markdown_body= [%blob "./documentation/checkers/Quandary.md"]}
-      ; support= mk_support_func ~clang:Support ~java:Support ()
-      ; short_documentation=
-          "The Quandary taint analysis detects flows of values between sources and sinks, except \
-           if the value went through a \"sanitizer\". In addition to some defaults, users can \
-           specify their own sources, sinks, and sanitizers functions."
-      ; cli_flags= Some {deprecated= []; show_in_help= true}
-      ; enabled_by_default= false
-      ; activates= [] }
   | RacerD ->
       { id= "racerd"
       ; kind=
@@ -445,18 +393,6 @@ let config_unsafe checker =
       ; cli_flags= Some {deprecated= []; show_in_help= true}
       ; enabled_by_default= false
       ; activates= [Pulse] }
-  | Uninit ->
-      { id= "uninit"
-      ; kind=
-          UserFacingDeprecated
-            { title= "Uninitialized Value"
-            ; markdown_body= ""
-            ; deprecation_message= "Uninitialized value checking has moved to Pulse." }
-      ; support= mk_support_func ~clang:Support ()
-      ; short_documentation= "Warns when values are used before having been initialized."
-      ; cli_flags= Some {deprecated= []; show_in_help= true}
-      ; enabled_by_default= false
-      ; activates= [] }
   | SILValidation ->
       { id= "sil-validation"
       ; kind= UserFacing {title= "SIL validation"; markdown_body= ""}
@@ -484,3 +420,65 @@ let config c =
 let get_id c = (config c).id
 
 let from_id id = List.find all ~f:(fun checker -> String.equal (get_id checker) id)
+
+let is_user_facing c =
+  let {kind} = config c in
+  match kind with UserFacing _ | UserFacingDeprecated _ -> true | Exercise | Internal -> false
+
+
+let pp_manual fmt checker =
+  let {kind; short_documentation; activates} = config checker in
+  let pp_kind fmt = function
+    | UserFacing _ | Exercise ->
+        ()
+    | Internal ->
+        F.fprintf fmt
+          "\n\
+           $(b,NOTE): This is used internally by other checkers and shouldn't need to be activated \
+           directly."
+    | UserFacingDeprecated {deprecation_message} ->
+        F.fprintf fmt "\n\n$(b,DEPRECATED): %s\n" deprecation_message
+  in
+  let pp_activates fmt activates =
+    match (List.filter ~f:is_user_facing) activates with
+    | [] ->
+        ()
+    | _ :: _ as activates ->
+        let pp_checker fmt c =
+          let {id} = config c in
+          F.fprintf fmt "$(i,%s)" id
+        in
+        F.fprintf fmt "\n$(i,ACTIVATES): %a" (Pp.seq ~sep:"," pp_checker) activates
+  in
+  F.fprintf fmt "%s%a%a" short_documentation pp_activates activates pp_kind kind
+
+
+module Key = struct
+  type nonrec t = t [@@deriving compare]
+
+  let pp f checker = F.pp_print_string f (get_id checker)
+end
+
+module Set = PrettyPrintable.MakePPSet (Key)
+module DependencyMap = PrettyPrintable.MakePPMonoMap (Key) (Set)
+
+let dependency_map =
+  let rec init_dep checker map =
+    match DependencyMap.find_opt checker map with
+    | Some checkers ->
+        (checkers, map)
+    | None ->
+        let {activates} = config_unsafe checker in
+        let dependencies, map =
+          List.fold activates
+            ~init:(Set.singleton checker, map)
+            ~f:(fun (acc_dependencies, map) checker ->
+              let new_dependencies, map = init_dep checker map in
+              (Set.union acc_dependencies new_dependencies, map) )
+        in
+        (dependencies, DependencyMap.add checker dependencies map)
+  in
+  List.fold all ~init:DependencyMap.empty ~f:(fun map checker -> init_dep checker map |> snd)
+
+
+let get_dependencies checker = DependencyMap.find checker dependency_map

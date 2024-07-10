@@ -6,8 +6,8 @@
 namespace Propagators;
 
 class Source {
-  public function getTainted(): int {
-    return 42;
+  public static function getTainted(): string {
+    return "42";
   }
 }
 
@@ -43,8 +43,7 @@ class Flows {
     Sink::process($t1);
   }
 
-  // FP in a sense that ideally we don't want to report taint in such cases
-  public static function FP_onlyPropWithSinkOk(): void {
+  public static function propWithSinkBad(): void {
     $t = Source::getTainted();
     $t1 = Prop::propWithSink($t);
   }

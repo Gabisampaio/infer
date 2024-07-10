@@ -118,11 +118,7 @@ let progress_bar_style_symbols = [("auto", `Auto); ("plain", `Plain); ("multilin
 
 (** Constant configuration values *)
 
-let anonymous_block_num_sep = "_"
-
 let anonymous_block_prefix = "objc_block_"
-
-let assign = "<\"Assign\">"
 
 (** If true, a procedure call succeeds even when there is a bound error this mimics what happens
     with a direct array access where an error is produced and the analysis continues *)
@@ -148,8 +144,6 @@ let fail_on_issue_exit_code = 2
 
 (** If true, treat calls to no-arg getters as idempotent w.r.t non-nullness *)
 let idempotent_getters = true
-
-let ivar_attributes = "ivar_attributes"
 
 let java_lambda_marker_infix_generated_by_javalib = "$Lambda$"
 
@@ -183,8 +177,6 @@ let manual_lineage = "LINEAGE OPTIONS"
 
 let manual_pulse = "PULSE CHECKER OPTIONS"
 
-let manual_quandary = "QUANDARY CHECKER OPTIONS"
-
 let manual_racerd = "RACERD CHECKER OPTIONS"
 
 let manual_scheduler = "ANALYSIS SCHEDULER OPTIONS"
@@ -204,8 +196,6 @@ let meet_level = 1
 
 let nsnotification_center_checker_backend = false
 
-let property_attributes = "property_attributes"
-
 (** If true, sanity-check inferred preconditions against Nullable annotations and report
     inconsistencies *)
 let report_nullable_inconsistency = true
@@ -220,10 +210,6 @@ let kotlin_source_extension = ".kt"
 
 (** Enable detailed tracing information during array abstraction *)
 let trace_absarray = false
-
-let unsafe_unret = "<\"Unsafe_unretained\">"
-
-let weak = "<\"Weak\">"
 
 (* Allow lists for C++ library functions *)
 
@@ -395,15 +381,11 @@ let pulse_default_taint_config = config_dir ^/ "taint"
 
 let wrappers_dir = lib_dir ^/ "wrappers"
 
-let ncpu = Utils.numcores
-
 let os_type = match Sys.os_type with "Win32" -> Win32 | "Cygwin" -> Cygwin | _ -> Unix
 
 (** Resolve relative paths passed as command line options, i.e., with respect to the working
     directory of the initial invocation of infer. *)
 let resolve = Utils.filename_to_absolute ~root:CLOpt.init_work_dir
-
-let infer_top_results_dir_env_var = "INFER_TOP_RESULTS_DIR"
 
 let infer_inside_maven_env_var = "INFER_INSIDE_MAVEN"
 
@@ -543,7 +525,7 @@ let () =
       | Some {deprecated; show_in_help} ->
           let in_help = if show_in_help then in_analyze_help else [] in
           CLOpt.mk_bool ?f ~long:config.id ~in_help ~default:config.enabled_by_default ~deprecated
-            (Printf.sprintf "checker %s: %s" config.id config.short_documentation)
+            (F.asprintf "$(i,%s) checker: %a" config.id Checker.pp_manual checker)
     in
     all_checkers := (checker, config, var) :: !all_checkers
   in
@@ -559,7 +541,7 @@ let () =
               var := b ;
               b )
             ( if show_in_help then
-                Printf.sprintf "Enable %s and disable all other checkers" config.id
+                Printf.sprintf "Enable $(i,%s) and disable all other checkers" config.id
               else "" )
             [] (* do all the work in ~f *) []
           (* do all the work in ~f *)
@@ -607,45 +589,57 @@ and analysis_schedule_file =
     ^ ResultsDirEntryName.get_path ~results_dir:"infer-out" AnalysisDependencyGraph )
 
 
-and annotation_reachability_cxx =
-  CLOpt.mk_json ~long:"annotation-reachability-cxx"
-    ~in_help:InferCommand.[(Analyze, manual_clang)]
-    ( "Specify annotation reachability analyses to be performed on C/C++/ObjC code. Each entry is \
-       a JSON object whose key is the issue name. \"sources\" and \"sinks\" can be specified \
-       either by symbol (including regexps) or path prefix.  \"sinks\" optionally can specify \
-       \"overrides\" (by symbol or path prefix) that block the reachability analysis when hit.  \
-       Example:\n"
-    ^ {|{
-    "ISOLATED_REACHING_CONNECT": {
-      "sources": {
-        "desc": "Code that should not call connect [optional]",
-        "paths": [ "isolated/" ]
-      },
-      "sinks": {
-        "symbols": [ "connect" ],
-        "overrides": { "symbol_regexps": [ ".*::Trusted::.*" ] }
-      }
-    }
-  }
-|}
-    ^ "\n\
-       This will cause us to create a new ISOLATED_REACHING_CONNECT issue for every function whose \
-       source path starts with \"isolated/\" that may reach the function named \"connect\", \
-       ignoring paths that go through a symbol matching the OCaml regexp \".*::Trusted::.*\"." )
+and annotation_reachability_apply_superclass_annotations =
+  CLOpt.mk_bool ~long:"annotation-reachability-apply-superclass-annotations"
+    ~in_help:InferCommand.[(Analyze, manual_java)]
+    "Applies annotations from superclasses and interfaces also on methods that are not overridden \
+     from the superclass or interface."
+    ~default:true
 
 
-and annotation_reachability_cxx_sources =
-  CLOpt.mk_json ~long:"annotation-reachability-cxx-sources"
-    ~in_help:InferCommand.[(Analyze, manual_clang)]
-    {|Override sources in all cxx annotation reachability specs with the given sources spec|}
+and annotation_reachability_custom_models =
+  CLOpt.mk_json ~long:"annotation-reachability-custom-models"
+    ~in_help:InferCommand.[(Analyze, manual_java)]
+    {|Specify a map from annotations to lists of regexps to treat matching methods as if they had the annotation.
+Example format: {"Annotation": ["com\\\\.Myclass\\\\.foo.*"]}|}
 
 
 and annotation_reachability_custom_pairs =
   CLOpt.mk_json ~long:"annotation-reachability-custom-pairs"
     ~in_help:InferCommand.[(Analyze, manual_java)]
-    {|Specify custom sources/sink for the annotation reachability checker
-Example format: for custom annotations com.my.annotation.{Source1,Source2,Sink1}
-{ "sources" : ["Source1", "Source2"], "sink" : "Sink1" }|}
+    {|Specify custom sources/sinks, and optionally sanitizers for the annotation reachability checker
+Example format: for custom annotations com.my.annotation.{Source1,Source2,Sink1,Sanitizer1}
+{ "sources" : ["Source1", "Source2"], "sinks" : ["Sink1"], "sanitizers": ["Sanitizer1"] }|}
+
+
+and annotation_reachability_expensive =
+  CLOpt.mk_bool ~long:"annotation-reachability-expensive"
+    ~in_help:InferCommand.[(Analyze, manual_java)]
+    ~default:false
+    "check if methods annotated with @PerformanceCritical can call expensive methods (annotated \
+     @Expensive or modeled, with annotation reachability checker)"
+
+
+and annotation_reachability_minimize_sources =
+  CLOpt.mk_bool ~long:"annotation-reachability-minimize-sources"
+    ~in_help:InferCommand.[(Analyze, manual_java)]
+    "do not report paths where a suffix is also a source to sink path. For example if there is a \
+     source1() -> source2() -> sink() path then only source2() -> sink() will be reported."
+    ~default:false
+
+
+and annotation_reachability_no_allocation =
+  CLOpt.mk_bool ~long:"annotation-reachability-no-allocation"
+    ~in_help:InferCommand.[(Analyze, manual_java)]
+    ~default:false
+    "check if methods annotated with @NoAllocation can allocate (with annotation reachability \
+     checker)"
+
+
+and annotation_reachability_report_source_and_sink =
+  CLOpt.mk_bool ~long:"annotation-reachability-report-source-and-sink"
+    ~in_help:InferCommand.[(Analyze, manual_java)]
+    "Reports methods that are marked as both a source and a sink at the same time." ~default:false
 
 
 and append_buck_flavors =
@@ -655,7 +649,7 @@ and append_buck_flavors =
      $(b,--buck-compilation-database) option."
 
 
-let biabduction_abs_struct =
+and biabduction_abs_struct =
   CLOpt.mk_int ~deprecated:["-abs-struct"] ~long:"biabduction-abs-struct" ~default:1 ~meta:"int"
     {|Specify abstraction level for fields of structs:
 - 0 = no
@@ -773,6 +767,198 @@ and biabduction_worklist_mode =
   var
 
 
+and ( biabduction_write_dotty
+    , bo_debug
+    , debug
+    , debug_exceptions
+    , debug_level_analysis
+    , debug_level_capture
+    , debug_level_report
+    , debug_level_test_determinator
+    , deduplicate
+    , developer_mode
+    , filtering
+    , frontend_tests
+    , keep_going
+    , only_cheap_debug
+    , print_buckets
+    , print_jbir
+    , print_logs
+    , print_types
+    , reports_include_ml_loc
+    , trace_error
+    , write_html ) =
+  let all_generic_manuals =
+    List.filter_map InferCommand.all_commands ~f:(fun (command : InferCommand.t) ->
+        match command with
+        | Debug | Explore | Help ->
+            None
+        | (Analyze | Capture | Compile | Report | ReportDiff | Run) as command ->
+            Some (command, manual_generic) )
+  in
+  let biabduction_write_dotty =
+    CLOpt.mk_bool ~long:"biabduction-write-dotty"
+      ~in_help:InferCommand.[(Analyze, manual_generic)]
+      (Printf.sprintf "Produce dotty files for specs and retain cycles reports in %s."
+         (ResultsDirEntryName.get_path ~results_dir:"infer-out" Debug) )
+  and bo_debug =
+    CLOpt.mk_int ~default:0 ~long:"bo-debug"
+      ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
+      "Debug level for buffer-overrun checker (0-4)"
+  and deduplicate =
+    CLOpt.mk_bool ~long:"deduplicate" ~default:true
+      ~in_help:
+        InferCommand.
+          [(Analyze, manual_generic); (Report, manual_generic); (ReportDiff, manual_generic)]
+      "Apply issue-specific deduplication during analysis and/or reporting."
+  and debug_level_analysis =
+    CLOpt.mk_int ~long:"debug-level-analysis" ~default:0 ~in_help:all_generic_manuals
+      "Debug level for the analysis. See $(b,--debug-level) for accepted values."
+  and debug_level_capture =
+    CLOpt.mk_int ~long:"debug-level-capture" ~default:0 ~in_help:all_generic_manuals
+      "Debug level for the capture. See $(b,--debug-level) for accepted values."
+  and debug_level_report =
+    CLOpt.mk_int ~long:"debug-level-report" ~default:0 ~in_help:all_generic_manuals
+      "Debug level for the report. See $(b,--debug-level) for accepted values."
+  and debug_level_test_determinator =
+    CLOpt.mk_int ~long:"debug-level-test-determinator" ~default:0
+      "Debug level for the test determinator. See $(b,--debug-level) for accepted values."
+  and developer_mode =
+    CLOpt.mk_bool ~long:"developer-mode"
+      ~default:(Option.exists ~f:InferCommand.(equal Report) initial_command)
+      "Show internal exceptions"
+  and filtering =
+    CLOpt.mk_bool ~deprecated_no:["nf"] ~long:"filtering" ~short:'f' ~default:true
+      ~in_help:InferCommand.[(Report, manual_generic)]
+      "Do not show the experimental and block listed issue types"
+  and only_cheap_debug =
+    CLOpt.mk_bool ~long:"only-cheap-debug" ~default:true "Disable expensive debugging output"
+  and print_buckets =
+    CLOpt.mk_bool ~long:"print-buckets"
+      "Show the internal bucket of Infer reports in their textual description"
+  and print_jbir =
+    CLOpt.mk_bool ~long:"print-jbir" "Print JBir translation of Java bytecode in logs"
+  and print_types = CLOpt.mk_bool ~long:"print-types" ~default:false "Print types in symbolic heaps"
+  and keep_going =
+    CLOpt.mk_bool ~deprecated_no:["-no-failures-allowed"] ~long:"keep-going"
+      ~in_help:InferCommand.[(Analyze, manual_generic); (Capture, manual_generic)]
+      "Keep going when the analysis or capture encounter a failure"
+  and reports_include_ml_loc =
+    CLOpt.mk_bool ~deprecated:["with_infer_src_loc"] ~long:"reports-include-ml-loc"
+      "Include the location in the Infer source code from where reports are generated"
+  and trace_error =
+    CLOpt.mk_bool ~long:"trace-error" "Detailed tracing information during error explanation"
+  and write_html =
+    CLOpt.mk_bool ~long:"write-html"
+      ~in_help:InferCommand.[(Analyze, manual_generic)]
+      (Printf.sprintf
+         "Produce html debug output for the analyses in %s. This shows the abstract state of all \
+          analyses at each program point in the source code. Each captured source file has its own \
+          html page. This HTML file contains the source file, and at each line of\n\
+          the file there are links to the nodes of the control flow graph of Infer's translation \
+          of that line of code into its intermediate representation (SIL). This way it's possible \
+          to see what the translation is, and the details of the symbolic execution on each node."
+         (ResultsDirEntryName.get_path ~results_dir:"infer-out" Debug) )
+  in
+  let set_debug_level level =
+    bo_debug := level ;
+    debug_level_analysis := level ;
+    debug_level_capture := level ;
+    debug_level_report := level ;
+    debug_level_test_determinator := level
+  in
+  let debug =
+    CLOpt.mk_bool_group ~deprecated:["debug"; "-stats"] ~long:"debug" ~short:'g'
+      ~in_help:all_generic_manuals
+      "Debug mode (also sets $(b,--debug-level 2), $(b,--developer-mode), $(b,--print-buckets), \
+       $(b,--print-types), $(b,--reports-include-ml-loc), $(b,--no-only-cheap-debug), \
+       $(b,--trace-error), $(b,--write-html))"
+      ~f:(fun debug ->
+        if debug then set_debug_level 2 else set_debug_level 0 ;
+        CommandLineOption.keep_args_file := debug ;
+        debug )
+      [developer_mode; print_buckets; print_types; reports_include_ml_loc; trace_error; write_html]
+      [only_cheap_debug]
+  and (_ : int option ref) =
+    CLOpt.mk_int_opt ~long:"debug-level" ~in_help:all_generic_manuals ~meta:"level"
+      ~f:(fun level ->
+        set_debug_level level ;
+        level )
+      {|Debug level (sets $(b,--bo-debug) $(i,level), $(b,--debug-level-analysis) $(i,level), $(b,--debug-level-capture) $(i,level)):
+  - 0: only basic debugging enabled
+  - 1: verbose debugging enabled
+  - 2: very verbose debugging enabled|}
+  and debug_exceptions =
+    CLOpt.mk_bool_group ~long:"debug-exceptions"
+      "Generate lightweight debugging information: just print the internal exceptions during \
+       analysis (also sets $(b,--developer-mode), $(b,--no-filtering), $(b,--no-deduplicate), \
+       $(b,--print-buckets), $(b,--reports-include-ml-loc))"
+      [developer_mode; print_buckets; reports_include_ml_loc]
+      [filtering; keep_going; deduplicate]
+  and frontend_tests =
+    CLOpt.mk_bool_group ~long:"frontend-tests"
+      ~in_help:InferCommand.[(Capture, manual_clang)]
+      "Save filename.ext.test.dot with the cfg in dotty format for frontend tests (also sets \
+       $(b,--print-types))"
+      [print_types] []
+  and print_logs =
+    CLOpt.mk_bool ~long:"print-logs"
+      ~in_help:
+        InferCommand.
+          [ (Analyze, manual_generic)
+          ; (Capture, manual_generic)
+          ; (Run, manual_generic)
+          ; (Report, manual_generic) ]
+      "Also log messages to stdout and stderr"
+  in
+  ( biabduction_write_dotty
+  , bo_debug
+  , debug
+  , debug_exceptions
+  , debug_level_analysis
+  , debug_level_capture
+  , debug_level_report
+  , debug_level_test_determinator
+  , deduplicate
+  , developer_mode
+  , filtering
+  , frontend_tests
+  , keep_going
+  , only_cheap_debug
+  , print_buckets
+  , print_jbir
+  , print_logs
+  , print_types
+  , reports_include_ml_loc
+  , trace_error
+  , write_html )
+
+
+and bo_assume_void =
+  CLOpt.mk_bool ~default:true ~long:"bo-assume-void"
+    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
+    "Assume void type as a type of record fields not in type environment."
+
+
+and bo_bottom_as_default =
+  CLOpt.mk_bool ~default:true ~long:"bo-bottom-as-default"
+    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
+    "Use bottom as a default value instead of unknown."
+
+
+and bo_context_sensitive_allocsites =
+  CLOpt.mk_bool ~default:false ~long:"bo-context-sensitive-allocsites"
+    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
+    "Assume that different calls to the same function creating an allocsite results in different \
+     allocsites imported to the caller."
+
+
+and bo_exit_frontend_gener_vars =
+  CLOpt.mk_bool ~default:false ~long:"bo-exit-frontend-gener-vars"
+    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
+    "Put frontend generated variables out of scope when they are listed in exit scope instruction."
+
+
 and bo_field_depth_limit =
   CLOpt.mk_int_opt ~long:"bo-field-depth-limit"
     ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
@@ -790,31 +976,6 @@ and bo_sound_unknown_sets_join =
     ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
     "Join with an unknown set always result in an unknown set. When disabled, unknown set behaves \
      as bot."
-
-
-and bo_bottom_as_default =
-  CLOpt.mk_bool ~default:true ~long:"bo-bottom-as-default"
-    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
-    "Use bottom as a default value instead of unknown."
-
-
-and bo_context_sensitive_allocsites =
-  CLOpt.mk_bool ~default:false ~long:"bo-context-sensitive-allocsites"
-    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
-    "Assume that different calls to the same function creating an allocsite results in different \
-     allocsites imported to the caller."
-
-
-and bo_assume_void =
-  CLOpt.mk_bool ~default:true ~long:"bo-assume-void"
-    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
-    "Assume void type as a type of record fields not in type environment."
-
-
-and bo_exit_frontend_gener_vars =
-  CLOpt.mk_bool ~default:false ~long:"bo-exit-frontend-gener-vars"
-    ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
-    "Put frontend generated variables out of scope when they are listed in exit scope instruction."
 
 
 and bootclasspath =
@@ -840,6 +1001,14 @@ and buck2_build_args_no_inline_rev =
      args starting with '@'. Only valid for $(b,--buck-clang)."
 
 
+and buck2_bxl_capture_file_block_list =
+  CLOpt.mk_string_list ~long:"buck2-bxl-capture-file-block-list"
+    ~in_help:InferCommand.[(Run, manual_buck); (Capture, manual_buck)]
+    ~meta:"regex"
+    "Skip capture of files matched by the specified regular expression. Only the clang,      Buck2 \
+     integration is supported, not Java."
+
+
 and buck2_bxl_target =
   CLOpt.mk_string_opt ~long:"buck2-bxl-target"
     ~in_help:InferCommand.[(Capture, manual_buck)]
@@ -850,6 +1019,12 @@ and buck2_inferconfig_target =
   CLOpt.mk_string_opt ~long:"buck2-inferconfig-target"
     ~in_help:InferCommand.[(Capture, manual_buck)]
     "Buck2 target representing the inferconfig file; used in BXL capture."
+
+
+and buck2_infertoolchain_target =
+  CLOpt.mk_string_opt ~long:"buck2-infertoolchain-target"
+    ~in_help:InferCommand.[(Capture, manual_buck)]
+    "Buck2 target representing the infer toolchain; used in BXL capture."
 
 
 and buck2_isolation_dir =
@@ -871,10 +1046,10 @@ and buck2_root =
     "Specify the parent directory of $(b, buck-out) (used only for $(b, buck2))."
 
 
-and buck2_use_bxl =
-  CLOpt.mk_bool ~long:"buck2-use-bxl" ~default:false
+and _buck2_use_bxl =
+  CLOpt.mk_bool ~long:"" ~deprecated:["-buck2-use-bxl"] ~deprecated_no:["-no-buck2-use-bxl"]
     ~in_help:InferCommand.[(Capture, manual_buck)]
-    "Use BXL script when capturing with buck2."
+    ~default:false "[DOES NOTHING] Use BXL script when capturing with buck2."
 
 
 and buck_block_list =
@@ -989,13 +1164,6 @@ and buck_targets_block_list =
     ~meta:"regex" "Skip capture of buck targets matched by the specified regular expression."
 
 
-and bxl_file_capture =
-  CLOpt.mk_bool ~long:"bxl-file-capture" ~default:false
-    ~in_help:InferCommand.[(Capture, manual_buck)]
-    "Given an $(b, --changed-file-index) file, capture the owning buck2 targets and their \
-     dependencies using the BXL script specified by $(b, --buck2_bxl_target)."
-
-
 and capture =
   CLOpt.mk_bool ~long:"capture" ~default:true
     "capture and translate source files into infer's intermediate language for analysis"
@@ -1017,12 +1185,6 @@ and capture_textual =
     "Generate a SIL program from a textual representation given in .sil files."
 
 
-and cfg_json =
-  CLOpt.mk_path_opt ~long:"cfg-json"
-    ~in_help:InferCommand.[(Capture, manual_generic)]
-    ~meta:"file" "Path to CFG json file"
-
-
 and censor_report =
   CLOpt.mk_string_list ~long:"censor-report" ~deprecated:["-filter-report"]
     ~in_help:InferCommand.[(Report, manual_generic); (Run, manual_generic)]
@@ -1038,6 +1200,12 @@ and censor_report =
      if it does not match the `issue_type_regex` or if it does match the `filename_regex`. The \
      filenames that are tested by the regex are relative to the `--project-root` directory. The \
      `<reason_string>` is a non-empty string used to explain why the issue was filtered."
+
+
+and cfg_json =
+  CLOpt.mk_path_opt ~long:"cfg-json"
+    ~in_help:InferCommand.[(Capture, manual_generic)]
+    ~meta:"file" "Path to CFG json file"
 
 
 and changed_files_index =
@@ -1061,19 +1229,6 @@ and clang_biniou_file =
      need to provide a compilation command."
 
 
-and clang_compound_literal_init_limit =
-  CLOpt.mk_int ~default:5 ~long:"clang-compound-literal-init-limit"
-    ~in_help:InferCommand.[(Analyze, manual_clang); (Capture, manual_clang)]
-    "Limit after which initialization of compound types (structs and arrays) is not done element \
-     by element but using a builtin function that each analysis has to model."
-
-
-and clang_extra_flags =
-  CLOpt.mk_string_list ~long:"Xclang"
-    ~in_help:InferCommand.[(Capture, manual_clang)]
-    "Pass values as command-line arguments to invocations of clang"
-
-
 and clang_block_listed_flags =
   CLOpt.mk_string_list ~long:"clang-block-listed-flags" ~deprecated:["-clang-blacklisted-flags"]
     ~default:
@@ -1095,11 +1250,17 @@ and clang_block_listed_flags_with_arg =
 
 and clang_compilation_dbs = ref []
 
-and clang_ignore_regex =
-  CLOpt.mk_string_opt ~long:"clang-ignore-regex" ~meta:"dir_OCaml_regex"
-    "The files in this regex will be ignored in the compilation process and an empty file will be \
-     passed to clang instead. This is to be used with the buck flavour infer-capture-all to work \
-     around missing generated files."
+and clang_compound_literal_init_limit =
+  CLOpt.mk_int ~default:5 ~long:"clang-compound-literal-init-limit"
+    ~in_help:InferCommand.[(Analyze, manual_clang); (Capture, manual_clang)]
+    "Limit after which initialization of compound types (structs and arrays) is not done element \
+     by element but using a builtin function that each analysis has to model."
+
+
+and clang_extra_flags =
+  CLOpt.mk_string_list ~long:"Xclang"
+    ~in_help:InferCommand.[(Capture, manual_clang)]
+    "Pass values as command-line arguments to invocations of clang"
 
 
 and clang_idirafter_to_override_regex =
@@ -1109,6 +1270,13 @@ and clang_idirafter_to_override_regex =
      path to those headers so that infer can use its own clang internal headers instead. \
      Concretely, this will replace $(b,-idirafter <path matching the regex>) with $(b,-idirafter \
      /path/to/infer/facebook-clang-plugins/clang/install/lib/clang/<version>/include)."
+
+
+and clang_ignore_regex =
+  CLOpt.mk_string_opt ~long:"clang-ignore-regex" ~meta:"dir_OCaml_regex"
+    "The files in this regex will be ignored in the compilation process and an empty file will be \
+     passed to clang instead. This is to be used with the buck flavour infer-capture-all to work \
+     around missing generated files."
 
 
 and clang_isystem_to_override_regex =
@@ -1227,6 +1395,14 @@ and config_impact_previous =
     "Config impact report of the base revision to use for comparison"
 
 
+and _config_impact_strict_beta_mode_paths =
+  CLOpt.mk_string_list
+    ~deprecated:["-config-impact-strict-beta-mode-paths"]
+    ~long:"" ~meta:"path_regex"
+    "Similar to $(b,--config-impact-strict-mode-paths), but the paths are used only for beta \
+     testing."
+
+
 and config_impact_strict_mode =
   CLOpt.mk_bool ~long:"config-impact-strict-mode"
     "Make the config impact analysis stricter. It disables all heuristics of ignoring cheap method \
@@ -1239,14 +1415,6 @@ and config_impact_strict_mode_paths =
      $(b,--config-impact-strict-mode-paths) is not given, the behavior depends on the \
      $(b,--config-impact-strict-mode) option: if $(b,--config-impact-strict-mode) is not given, it \
      runs as non-strict mode; otherwise, it runs as strict mode, but for all paths."
-
-
-and _config_impact_strict_beta_mode_paths =
-  CLOpt.mk_string_list
-    ~deprecated:["-config-impact-strict-beta-mode-paths"]
-    ~long:"" ~meta:"path_regex"
-    "Similar to $(b,--config-impact-strict-mode-paths), but the paths are used only for beta \
-     testing."
 
 
 and config_impact_test_paths =
@@ -1271,16 +1439,21 @@ and continue_analysis =
      $(b,--incremental-analysis)."
 
 
-and costs_current =
-  CLOpt.mk_path_opt ~long:"costs-current"
-    ~in_help:InferCommand.[(ReportDiff, manual_generic)]
-    "Costs report of the latest revision"
-
-
 and cost_issues_tests =
   CLOpt.mk_path_opt ~long:"cost-issues-tests"
     ~in_help:InferCommand.[(Report, manual_generic)]
     ~meta:"file" "Write a list of cost issues in a format suitable for cost tests to $(i,file)"
+
+
+and cost_log_unknown_calls =
+  CLOpt.mk_bool ~long:"cost-log-unknown-calls"
+    "log calls to unknown functions in the cost and inferbo checkers"
+
+
+and costs_current =
+  CLOpt.mk_path_opt ~long:"costs-current"
+    ~in_help:InferCommand.[(ReportDiff, manual_generic)]
+    "Costs report of the latest revision"
 
 
 and costs_previous =
@@ -1295,178 +1468,17 @@ and cost_suppress_func_ptr =
     "Suppress printing function pointers in cost reports"
 
 
-and cxx_scope_guards =
-  CLOpt.mk_json ~long:"cxx-scope-guards"
-    ~in_help:InferCommand.[(Analyze, manual_clang)]
-    "Specify scope guard classes that can be read only by destructors without being reported as \
-     dead stores."
-
-
 and cxx =
   CLOpt.mk_bool ~long:"cxx" ~default:true
     ~in_help:InferCommand.[(Capture, manual_clang)]
     "Analyze C++ methods"
 
 
-and ( biabduction_write_dotty
-    , bo_debug
-    , deduplicate
-    , developer_mode
-    , debug
-    , debug_exceptions
-    , debug_level_analysis
-    , debug_level_capture
-    , debug_level_test_determinator
-    , filtering
-    , frontend_tests
-    , keep_going
-    , only_cheap_debug
-    , print_buckets
-    , print_jbir
-    , print_logs
-    , print_types
-    , reports_include_ml_loc
-    , trace_error
-    , write_html ) =
-  let all_generic_manuals =
-    List.filter_map InferCommand.all_commands ~f:(fun (command : InferCommand.t) ->
-        match command with
-        | Debug | Explore | Help ->
-            None
-        | (Analyze | Capture | Compile | Report | ReportDiff | Run) as command ->
-            Some (command, manual_generic) )
-  in
-  let biabduction_write_dotty =
-    CLOpt.mk_bool ~long:"biabduction-write-dotty"
-      ~in_help:InferCommand.[(Analyze, manual_generic)]
-      (Printf.sprintf "Produce dotty files for specs and retain cycles reports in %s."
-         (ResultsDirEntryName.get_path ~results_dir:"infer-out" Debug) )
-  and bo_debug =
-    CLOpt.mk_int ~default:0 ~long:"bo-debug"
-      ~in_help:InferCommand.[(Analyze, manual_buffer_overrun)]
-      "Debug level for buffer-overrun checker (0-4)"
-  and deduplicate =
-    CLOpt.mk_bool ~long:"deduplicate" ~default:true
-      ~in_help:
-        InferCommand.
-          [(Analyze, manual_generic); (Report, manual_generic); (ReportDiff, manual_generic)]
-      "Apply issue-specific deduplication during analysis and/or reporting."
-  and debug_level_analysis =
-    CLOpt.mk_int ~long:"debug-level-analysis" ~default:0 ~in_help:all_generic_manuals
-      "Debug level for the analysis. See $(b,--debug-level) for accepted values."
-  and debug_level_capture =
-    CLOpt.mk_int ~long:"debug-level-capture" ~default:0 ~in_help:all_generic_manuals
-      "Debug level for the capture. See $(b,--debug-level) for accepted values."
-  and debug_level_test_determinator =
-    CLOpt.mk_int ~long:"debug-level-test-determinator" ~default:0
-      "Debug level for the test determinator. See $(b,--debug-level) for accepted values."
-  and developer_mode =
-    CLOpt.mk_bool ~long:"developer-mode"
-      ~default:(Option.exists ~f:InferCommand.(equal Report) initial_command)
-      "Show internal exceptions"
-  and filtering =
-    CLOpt.mk_bool ~deprecated_no:["nf"] ~long:"filtering" ~short:'f' ~default:true
-      ~in_help:InferCommand.[(Report, manual_generic)]
-      "Do not show the experimental and block listed issue types"
-  and only_cheap_debug =
-    CLOpt.mk_bool ~long:"only-cheap-debug" ~default:true "Disable expensive debugging output"
-  and print_buckets =
-    CLOpt.mk_bool ~long:"print-buckets"
-      "Show the internal bucket of Infer reports in their textual description"
-  and print_jbir =
-    CLOpt.mk_bool ~long:"print-jbir" "Print JBir translation of Java bytecode in logs"
-  and print_types = CLOpt.mk_bool ~long:"print-types" ~default:false "Print types in symbolic heaps"
-  and keep_going =
-    CLOpt.mk_bool ~deprecated_no:["-no-failures-allowed"] ~long:"keep-going"
-      ~in_help:InferCommand.[(Analyze, manual_generic); (Capture, manual_generic)]
-      "Keep going when the analysis or capture encounter a failure"
-  and reports_include_ml_loc =
-    CLOpt.mk_bool ~deprecated:["with_infer_src_loc"] ~long:"reports-include-ml-loc"
-      "Include the location in the Infer source code from where reports are generated"
-  and trace_error =
-    CLOpt.mk_bool ~long:"trace-error" "Detailed tracing information during error explanation"
-  and write_html =
-    CLOpt.mk_bool ~long:"write-html"
-      ~in_help:InferCommand.[(Analyze, manual_generic)]
-      (Printf.sprintf
-         "Produce html debug output for the analyses in %s. This shows the abstract state of all \
-          analyses at each program point in the source code. Each captured source file has its own \
-          html page. This HTML file contains the source file, and at each line of\n\
-          the file there are links to the nodes of the control flow graph of Infer's translation \
-          of that line of code into its intermediate representation (SIL). This way it's possible \
-          to see what the translation is, and the details of the symbolic execution on each node."
-         (ResultsDirEntryName.get_path ~results_dir:"infer-out" Debug) )
-  in
-  let set_debug_level level =
-    bo_debug := level ;
-    debug_level_analysis := level ;
-    debug_level_capture := level ;
-    debug_level_test_determinator := level
-  in
-  let debug =
-    CLOpt.mk_bool_group ~deprecated:["debug"; "-stats"] ~long:"debug" ~short:'g'
-      ~in_help:all_generic_manuals
-      "Debug mode (also sets $(b,--debug-level 2), $(b,--developer-mode), $(b,--print-buckets), \
-       $(b,--print-types), $(b,--reports-include-ml-loc), $(b,--no-only-cheap-debug), \
-       $(b,--trace-error), $(b,--write-html))"
-      ~f:(fun debug ->
-        if debug then set_debug_level 2 else set_debug_level 0 ;
-        CommandLineOption.keep_args_file := debug ;
-        debug )
-      [developer_mode; print_buckets; print_types; reports_include_ml_loc; trace_error; write_html]
-      [only_cheap_debug]
-  and (_ : int option ref) =
-    CLOpt.mk_int_opt ~long:"debug-level" ~in_help:all_generic_manuals ~meta:"level"
-      ~f:(fun level ->
-        set_debug_level level ;
-        level )
-      {|Debug level (sets $(b,--bo-debug) $(i,level), $(b,--debug-level-analysis) $(i,level), $(b,--debug-level-capture) $(i,level)):
-  - 0: only basic debugging enabled
-  - 1: verbose debugging enabled
-  - 2: very verbose debugging enabled|}
-  and debug_exceptions =
-    CLOpt.mk_bool_group ~long:"debug-exceptions"
-      "Generate lightweight debugging information: just print the internal exceptions during \
-       analysis (also sets $(b,--developer-mode), $(b,--no-filtering), $(b,--no-deduplicate), \
-       $(b,--print-buckets), $(b,--reports-include-ml-loc))"
-      [developer_mode; print_buckets; reports_include_ml_loc]
-      [filtering; keep_going; deduplicate]
-  and frontend_tests =
-    CLOpt.mk_bool_group ~long:"frontend-tests"
-      ~in_help:InferCommand.[(Capture, manual_clang)]
-      "Save filename.ext.test.dot with the cfg in dotty format for frontend tests (also sets \
-       $(b,--print-types))"
-      [print_types] []
-  and print_logs =
-    CLOpt.mk_bool ~long:"print-logs"
-      ~in_help:
-        InferCommand.
-          [ (Analyze, manual_generic)
-          ; (Capture, manual_generic)
-          ; (Run, manual_generic)
-          ; (Report, manual_generic) ]
-      "Also log messages to stdout and stderr"
-  in
-  ( biabduction_write_dotty
-  , bo_debug
-  , deduplicate
-  , developer_mode
-  , debug
-  , debug_exceptions
-  , debug_level_analysis
-  , debug_level_capture
-  , debug_level_test_determinator
-  , filtering
-  , frontend_tests
-  , keep_going
-  , only_cheap_debug
-  , print_buckets
-  , print_jbir
-  , print_logs
-  , print_types
-  , reports_include_ml_loc
-  , trace_error
-  , write_html )
+and cxx_scope_guards =
+  CLOpt.mk_json ~long:"cxx-scope-guards"
+    ~in_help:InferCommand.[(Analyze, manual_clang)]
+    "Specify scope guard classes that can be read only by destructors without being reported as \
+     dead stores."
 
 
 and data_flow_queries_on_topl =
@@ -1486,6 +1498,21 @@ and dependencies =
     ~in_help:InferCommand.[(Capture, manual_java)]
     "Translate all the dependencies during the capture. The classes in the given jar file will be \
      translated. No sources needed."
+
+
+and detach_analysis_dependency =
+  CLOpt.mk_bool ~long:"detach-analysis-dependency"
+    ~in_help:InferCommand.[(Analyze, manual_generic)]
+    "Detach analysis dependencies of checkers during the analysis, so that each checker triggers \
+     themselves only when analyzing a callee. This can save unnecessary analyses on the situation \
+     that NOT all of the captured data should be analyzed, e.g. $(b,--changed-files-index) is \
+     given."
+
+
+and dict_missing_key_var_block_list =
+  CLOpt.mk_string_list ~long:"dict-missing-key-var-block-list" ~meta:"string"
+    ~in_help:InferCommand.[(Analyze, manual_generic)]
+    "Skip analyzing the variables in the dict-missing-key checker."
 
 
 and differential_filter_files =
@@ -1579,20 +1606,6 @@ and dynamic_dispatch_json_file_path =
     "Dynamic dispatch file path to get the JSON used for method name substitution"
 
 
-and eradicate_condition_redundant =
-  CLOpt.mk_bool ~long:"eradicate-condition-redundant" "Condition redundant warnings"
-
-
-and eradicate_field_over_annotated =
-  CLOpt.mk_bool ~long:"eradicate-field-over-annotated" "Field over-annotated warnings"
-
-
-and eradicate_return_over_annotated =
-  CLOpt.mk_bool ~long:"eradicate-return-over-annotated" "Return over-annotated warning"
-
-
-and eradicate_verbose = CLOpt.mk_bool ~long:"eradicate-verbose" "Print initial and final typestates"
-
 and erlang_ast_dir =
   CLOpt.mk_path_opt ~long:"erlang-ast-dir"
     ~in_help:InferCommand.[(Capture, manual_erlang)]
@@ -1608,6 +1621,20 @@ and erlang_check_return =
      promises. This check is introduced at capture time."
 
 
+and erlang_list_unfold_depth =
+  CLOpt.mk_int ~long:"erlang-list-unfold-depth" ~default:4
+    ~in_help:InferCommand.[(Analyze, manual_erlang)]
+    "Unfold Erlang lists up to depth $(i,int)"
+
+
+and erlang_reliability =
+  CLOpt.mk_bool ~long:"erlang-reliability" ~default:true
+    ~in_help:InferCommand.[(Capture, manual_erlang); (Analyze, manual_erlang)]
+    "Analyze crashing executions. This flag affects both capture and analysis. At capture time, it \
+     encodes Erlang specs; at (Pulse) analysis time, it models Erlang exceptions (builtin or OTP \
+     ones)."
+
+
 and erlang_skip_compile =
   CLOpt.mk_bool ~long:"erlang-skip-compile"
     ~in_help:InferCommand.[(Capture, manual_erlang)]
@@ -1620,12 +1647,6 @@ and erlang_with_otp_specs =
     ~in_help:InferCommand.[(Capture, manual_erlang)]
     "[EXPERIMENTAL] Use type specs from OTP (available in the system) to generate more precise \
      Pulse summaries for unknown library functions."
-
-
-and erlang_list_unfold_depth =
-  CLOpt.mk_int ~long:"erlang-list-unfold-depth" ~default:4
-    ~in_help:InferCommand.[(Analyze, manual_erlang)]
-    "Unfold Erlang lists up to depth $(i,int)"
 
 
 and export_changed_functions =
@@ -1703,14 +1724,6 @@ and force_integration =
        |> String.concat ~sep:", " ) )
 
 
-and from_json_report =
-  CLOpt.mk_path_opt ~long:"from-json-report"
-    ~in_help:InferCommand.[(Report, manual_generic)]
-    ~meta:"report.json"
-    "Load analysis results from a report file (default is to load the results from the specs files \
-     generated by the analysis)."
-
-
 and from_json_config_impact_report =
   CLOpt.mk_path_opt ~long:"from-json-config-impact-report"
     ~in_help:InferCommand.[(Report, manual_generic)]
@@ -1724,14 +1737,26 @@ and from_json_costs_report =
     ~meta:"costs-report.json" "Load costs analysis results from a costs-report file."
 
 
+and from_json_report =
+  CLOpt.mk_path_opt ~long:"from-json-report"
+    ~in_help:InferCommand.[(Report, manual_generic)]
+    ~meta:"report.json"
+    "Load analysis results from a report file (default is to load the results from the specs files \
+     generated by the analysis)."
+
+
 and frontend_stats =
   CLOpt.mk_bool ~deprecated:["fs"] ~deprecated_no:["nfs"] ~long:"frontend-stats"
     "Output statistics about the capture phase to *.o.astlog (clang only)"
 
 
-and function_pointer_specialization =
-  CLOpt.mk_bool ~long:"function-pointer-specialization" ~default:false
-    "Apply function specialization to higher-order functions taking function pointers."
+and _function_pointer_specialization =
+  CLOpt.mk_bool ~long:""
+    ~deprecated:["-function-pointer-specialization"]
+    ~deprecated_no:["-no-function-pointer-specialization"]
+    ~default:false
+    "[DOES NOTHING] Used to apply function specialization to higher-order functions taking \
+     function pointers."
 
 
 and generated_classes =
@@ -1745,24 +1770,34 @@ and genrule_mode =
     "Enable the genrule compatibility mode used for the Buck integration"
 
 
-and hackc_binary =
-  CLOpt.mk_string ~long:"hackc-binary" ~default:"hackc" ~meta:"path"
-    "Specify hackc binary to use (either name or path)"
+and global_tenv =
+  CLOpt.mk_bool ~long:"global-tenv" "Print the global type environment."
+    ~in_help:InferCommand.[(Debug, manual_debug_global_tenv)]
+
+
+and hackc_binary = CLOpt.mk_path_opt ~long:"hackc-binary" "Specify hackc binary to use"
+
+and hack_builder_patterns =
+  CLOpt.mk_json ~long:"hack-builder-patterns" "Specify builder classes and finalizer methods"
 
 
 and hack_builtin_models =
-  CLOpt.mk_string ~long:"hack-builtin-models" ~default:default_hack_builtin_models
+  CLOpt.mk_path ~long:"hack-builtin-models" ~default:default_hack_builtin_models
     "Specify .sil file to use as Hack builtin models (uses bundled models by default)"
 
 
 and hack_models =
-  CLOpt.mk_string_list ~long:"hack-models"
-    "Specify .sil and .hack files to use as Hack models on top of builtins. Relative filenames are \
-     resolved against project's root"
+  CLOpt.mk_path_list ~long:"hack-models"
+    "Specify .sil and .hack files to use as Hack models on top of builtins"
 
 
 and hack_naming_table =
   CLOpt.mk_path_opt ~long:"hack-naming-table" "Location of a Hack naming table (sqlite)"
+
+
+and hack_verify_capture_only =
+  CLOpt.mk_bool ~long:"hack-verify-capture-only"
+    "Run capture without saving anything into capture DB"
 
 
 and headers =
@@ -1809,17 +1844,17 @@ and help_issue_type =
      all issue types, see $(b,--list-issue-types)."
 
 
-and html =
-  CLOpt.mk_bool ~long:"html"
-    ~in_help:InferCommand.[(Explore, manual_explore_bugs)]
-    "Generate an html report of issues found."
-
-
 and hoisting_report_only_expensive =
   CLOpt.mk_bool ~long:"hoisting-report-only-expensive" ~default:true
     ~in_help:InferCommand.[(Report, manual_hoisting)]
     "[Hoisting] Report loop-invariant calls only when the function is expensive, i.e. at least \
      linear"
+
+
+and html =
+  CLOpt.mk_bool ~long:"html"
+    ~in_help:InferCommand.[(Explore, manual_explore_bugs)]
+    "Generate an html report of issues found."
 
 
 and icfg_dotty_outfile =
@@ -1867,14 +1902,6 @@ and incremental_analysis, mark_unchanged_procs, invalidate_only =
   (incremental_analysis, mark_unchanged_procs, invalidate_only)
 
 
-and inline_func_pointer_for_testing =
-  CLOpt.mk_string_opt ~long:"inline-func-pointer-for-testing"
-    ~in_help:InferCommand.[(Analyze, manual_clang)]
-    "Enables substituting global function pointers used for testing with the real function calls \
-     in the clang frontend. Pass the prefix used to build the global function pointers used for \
-     testing."
-
-
 and _inferconfig_path =
   (* This is a no-op argument ensuring a meaningful message in case of error, as well as to
      silently consume the argument which is parsed specially. *)
@@ -1889,20 +1916,36 @@ and _inferconfig_path =
         inferconfig_file inferconfig_env_var inferconfig_file inferconfig_file )
 
 
-and issues_tests_fields =
-  CLOpt.mk_symbol_seq ~long:"issues-tests-fields"
-    ~in_help:InferCommand.[(Report, manual_generic)]
-    ~default:
-      IssuesTestField.
-        [File; Procedure; LineOffset; BugType; Bucket; Severity; BugTrace; NullsafeExtra; TaintExtra]
-    ~symbols:IssuesTestField.all_symbols ~eq:IssuesTestField.equal
-    "Fields to emit with $(b,--issues-tests)"
+and inline_func_pointer_for_testing =
+  CLOpt.mk_string_opt ~long:"inline-func-pointer-for-testing"
+    ~in_help:InferCommand.[(Analyze, manual_clang)]
+    "Enables substituting global function pointers used for testing with the real function calls \
+     in the clang frontend. Pass the prefix used to build the global function pointers used for \
+     testing."
 
 
 and issues_tests =
   CLOpt.mk_path_opt ~long:"issues-tests"
     ~in_help:InferCommand.[(Report, manual_generic)]
     ~meta:"file" "Write a list of issues in a format suitable for tests to $(i,file)"
+
+
+and issues_tests_fields =
+  CLOpt.mk_symbol_seq ~long:"issues-tests-fields"
+    ~in_help:InferCommand.[(Report, manual_generic)]
+    ~default:
+      IssuesTestField.
+        [ File
+        ; Procedure
+        ; LineOffset
+        ; BugType
+        ; Bucket
+        ; Severity
+        ; BugTrace
+        ; TaintExtra
+        ; TransitiveCalleesExtra ]
+    ~symbols:IssuesTestField.all_symbols ~eq:IssuesTestField.equal
+    "Fields to emit with $(b,--issues-tests)"
 
 
 and java_debug_source_file_info =
@@ -1916,8 +1959,6 @@ and java_jar_compiler =
     ~in_help:InferCommand.[(Capture, manual_java)]
     ~meta:"path" "Specify the Java compiler jar used to generate the bytecode"
 
-
-and java_reflection = CLOpt.mk_bool ~long:"java-reflection" "Print usages of reflection in the log."
 
 and java_source_parser_experimental =
   CLOpt.mk_bool ~long:"java-source-parser-experimental"
@@ -1933,16 +1974,159 @@ and java_version =
 and job_id = CLOpt.mk_string_opt ~long:"job-id" "Specify the job ID of this Infer run."
 
 and jobs =
-  CLOpt.mk_int ~deprecated:["-multicore"] ~long:"jobs" ~short:'j' ~default:ncpu
-    ~default_to_string:(fun _ -> "<number of cores>")
+  CLOpt.mk_int_opt ~long:"jobs" ~short:'j'
     ~in_help:InferCommand.[(Analyze, manual_generic)]
-    ~meta:"int" "Run the specified number of analysis jobs simultaneously"
+    ~meta:"int"
+    "Run the specified number of analysis jobs simultaneously. Defaults to the minimum value of \
+     the max_jobs argument and the number of CPUs."
 
 
 and kotlin_capture =
-  CLOpt.mk_bool ~long:"kotlin-capture" ~default:false
+  CLOpt.mk_bool ~long:"kotlin-capture" ~default:true
     ~in_help:InferCommand.[(Capture, manual_java)]
-    "Enable Kotlin capture (experimental, do not use)."
+    "Enable Kotlin capture."
+
+
+and lineage_source =
+  CLOpt.mk_string_list ~long:"lineage-source"
+    ~in_help:InferCommand.[(Report, manual_lineage)]
+    "[EXPERIMENTAL; UNSTABLE API] Lineage sources for taint finding, format \
+     [module:]function/arity.{ret,argN}, comma-separated."
+
+
+and lineage_sink =
+  CLOpt.mk_string_list ~long:"lineage-sink"
+    ~in_help:InferCommand.[(Report, manual_lineage)]
+    "[EXPERIMENTAL; UNSTABLE API] Lineage sinks for taint finding, format \
+     [module:]function/arity.{ret,argN}, comma-separated."
+
+
+and lineage_sanitizers =
+  CLOpt.mk_string_list ~long:"lineage-sanitizers"
+    ~in_help:InferCommand.[(Report, manual_lineage)]
+    "[EXPERIMENTAL; UNSTABLE API] Lineage sanitizers, comma-separated m:f/a"
+
+
+and lineage_limit =
+  CLOpt.mk_int_opt ~long:"lineage-limit"
+    "[EXPERIMENTAL; UNSTABLE API] Lineage pathfinding internal limit. Behaviour unspecified, but \
+     lower values should skip more paths."
+
+
+and lineage_dedup =
+  CLOpt.mk_bool ~deprecated:["-simple-lineage-dedup"] ~long:"lineage-dedup" ~default:true
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "In JSON output, attempt to print each entity at most once. This is the default. The only \
+     reason you may want to turn this off is to make hash collisions more visible; that is, cases \
+     in which distinct entities get assigned the same ID."
+
+
+and lineage_field_depth =
+  CLOpt.mk_int ~deprecated:["-simple-lineage-field-depth"] ~long:"lineage-field-depth" ~default:5
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "[EXPERIMENTAL] Maximal field depth sensitivity for lineage analysis. 0 will make the analysis \
+     field insensitive."
+
+
+and lineage_field_max_cfg_size =
+  CLOpt.mk_int_opt ~long:"lineage-field-max-cfg-size" ~default:15000
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "If set, field sensitivity is disabled on larger CFGs."
+
+
+and lineage_field_width =
+  CLOpt.mk_int ~deprecated:["-simple-lineage-field-width"] ~long:"lineage-field-width" ~default:5
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "[EXPERIMENTAL] Maximal width of structures for field sensitive lineage analysis. Structure \
+     that have a higher number of fields will be smashed into a single element. 0 will make the \
+     analysis field insensitive."
+
+
+and lineage_include_builtins =
+  CLOpt.mk_bool
+    ~deprecated:["-simple-lineage-include-builtins"]
+    ~long:"lineage-include-builtins"
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "Include call/return edges to/from procedures that model primitive Erlang operations, such as \
+     constructing a list."
+
+
+and lineage_json_report =
+  CLOpt.mk_bool ~deprecated:["-simple-lineage-json-report"] ~long:"lineage-json-report"
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "Enable lineage report in JSON format."
+
+
+and lineage_keep_temporaries =
+  CLOpt.mk_bool
+    ~deprecated:["-simple-lineage-keep-temporaries"]
+    ~long:"lineage-keep-temporaries"
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "Normally, lineage summaries do not mention temporary variables introduced while compiling the \
+     high-level code to Infer's IR (intermediate representation). If this option is enabled, then \
+     the lineage graph produced corresponds to Infer's IR."
+
+
+and lineage_max_cfg_size =
+  CLOpt.mk_int_opt ~deprecated:["-simple-lineage-max-cfg-size"] ~long:"lineage-max-cfg-size"
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "If set, larger CFGs are skipped."
+
+
+and lineage_prevent_cycles =
+  CLOpt.mk_bool
+    ~deprecated:["-simple-lineage-prevent-cycles"]
+    ~long:"lineage-prevent-cycles" ~default:true
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "[EXPERIMENTAL] If given, Lineage will not stop traversing the fields of a variable when it \
+     notices recursive types (that is, a sub-field having the same type as one of its \
+     \"ancestors\")."
+
+
+and lineage_seed =
+  CLOpt.mk_int ~deprecated:["-simple-lineage-seed"] ~long:"lineage-seed" ~default:123
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "Set the random seed used for hashing. (Various entities that get reported need unique \
+     identifiers. To generate these unique identifiers, in a distributed way without \
+     communication, we use hashing. If you are unlucky and get collisions, you can try a different \
+     seed."
+
+
+and lineage_variant_width =
+  CLOpt.mk_int ~long:"lineage-variant-width" ~default:20
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "Maximal width of variant types for lineage analysis. A variant type is the type of a variable \
+     whose value is within a statically known atom set. The width of the type is the cardinal of \
+     that atom set."
+
+
+and _linters =
+  CLOpt.mk_bool ~long:"" ~deprecated:["-linters"] ~deprecated_no:["-no-linters"]
+    "[DOES NOTHING] this used to de-activate ASTLanguage (AL) linters"
+
+
+and list_categories =
+  CLOpt.mk_bool ~long:"list-categories"
+    ~in_help:InferCommand.[(Help, manual_generic)]
+    "Show the list of all categories of issue types that infer might report."
+
+
+and list_checkers =
+  CLOpt.mk_bool ~long:"list-checkers"
+    ~in_help:InferCommand.[(Help, manual_generic)]
+    "Show the list of all available checkers."
+
+
+and list_issue_types =
+  CLOpt.mk_bool ~long:"list-issue-types"
+    ~in_help:InferCommand.[(Help, manual_generic)]
+    "Show the list of all issue types that infer might report."
+
+
+and liveness_block_list_var_regex =
+  CLOpt.mk_string_opt ~long:"liveness-block-list-var-regex"
+    ~in_help:InferCommand.[(Analyze, manual_clang)]
+    "Specify a regular expression for variable names that are ignored when reporting dead stores."
 
 
 and liveness_dangerous_classes =
@@ -1960,34 +2144,6 @@ and liveness_ignored_constant =
     "List of integer constants to be ignored by liveness analysis"
 
 
-and _log_events =
-  CLOpt.mk_bool ~long:"" ~deprecated:["-log-events"] ~deprecated_no:["-no-log-events"]
-    "[DOES NOTHING] Turn on the feature that logs events in a machine-readable format"
-
-
-and _log_skipped =
-  CLOpt.mk_bool ~long:"" ~deprecated:["-log-skipped"] ~deprecated_no:["-no-log-skipped"]
-    "[DOES NOTHING] Turn on the feature that logs skipped functions (one per file) in a \
-     machine-readable format"
-
-
-and _linters =
-  CLOpt.mk_bool ~long:"" ~deprecated:["-linters"] ~deprecated_no:["-no-linters"]
-    "[DOES NOTHING] this used to de-activate ASTLanguage (AL) linters"
-
-
-and list_checkers =
-  CLOpt.mk_bool ~long:"list-checkers"
-    ~in_help:InferCommand.[(Help, manual_generic)]
-    "Show the list of all available checkers."
-
-
-and list_issue_types =
-  CLOpt.mk_bool ~long:"list-issue-types"
-    ~in_help:InferCommand.[(Help, manual_generic)]
-    "Show the list of all issue types that infer might report."
-
-
 and load_average =
   CLOpt.mk_float_opt ~long:"load-average" ~short:'l'
     ~in_help:InferCommand.[(Capture, manual_generic)]
@@ -1996,10 +2152,41 @@ and load_average =
      make only)"
 
 
+and lock_model =
+  CLOpt.mk_json ~long:"lock-model"
+    ~in_help:InferCommand.[(Analyze, manual_clang)]
+    {|Specify custom lock models for starvation analysis.
+Example for pthreads (already included in infer):
+[{"lock":["pthread_mutex_lock"],"unlock":["pthread_mutex_unlock"]}] |}
+
+
+and _log_events =
+  CLOpt.mk_bool ~long:"" ~deprecated:["-log-events"] ~deprecated_no:["-no-log-events"]
+    "[DOES NOTHING] Turn on the feature that logs events in a machine-readable format"
+
+
+and log_pulse_disjunct_increase_after_model_call =
+  CLOpt.mk_bool ~long:"log-pulse-disjunct-increase-after-model-call" ~default:false
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Log which model did increase the current number of Pulse disjuncts."
+
+
+and log_pulse_coverage =
+  CLOpt.mk_bool ~long:"log-pulse-coverage" ~default:false
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Log precisely where coverage stops, at the end of file stats/stats.txt."
+
+
 and log_missing_deps =
   CLOpt.mk_bool ~long:"log-missing-deps" ~default:false
     ~in_help:InferCommand.[(Analyze, manual_generic)]
     "Log analysis dependencies that cannot be found."
+
+
+and _log_skipped =
+  CLOpt.mk_bool ~long:"" ~deprecated:["-log-skipped"] ~deprecated_no:["-no-log-skipped"]
+    "[DOES NOTHING] Turn on the feature that logs skipped functions (one per file) in a \
+     machine-readable format"
 
 
 and margin =
@@ -2019,9 +2206,11 @@ and mask_sajwa_exceptions =
 
 
 and max_jobs =
-  CLOpt.mk_int_opt ~long:"max-jobs"
+  CLOpt.mk_int ~long:"max-jobs" ~default:40
     ~in_help:InferCommand.[(Analyze, manual_generic)]
-    ~meta:"int" "Maximum number of analysis jobs running simultaneously"
+    ~meta:"int"
+    "Maximum number of analysis jobs running simultaneously. Experiments show current best value \
+     is 40 jobs."
 
 
 and max_nesting =
@@ -2107,47 +2296,12 @@ and nullable_annotation =
   CLOpt.mk_string_opt ~long:"nullable-annotation-name" "Specify a custom nullable annotation name."
 
 
-and nullsafe_annotation_graph =
-  CLOpt.mk_bool ~long:"nullsafe-annotation-graph"
-    "Nullsafe: an experimental mode for calculating the dependency graph between potential \
-     annotations to add in the source code."
-
-
-and nullsafe_disable_field_not_initialized_in_nonstrict_classes =
-  CLOpt.mk_bool ~long:"nullsafe-disable-field-not-initialized-in-nonstrict-classes" ~default:false
-    "Nullsafe: In this mode field not initialized issues won't be reported unless the class is \
-     marked as @NullsafeStrict. This feature is needed for compatibility reasons."
-
-
-and nullsafe_optimistic_third_party_in_default_mode =
-  CLOpt.mk_bool
-    ~long:"nullsafe-optimistic-third-party-in-default-mode"
-      (* Turned on for compatibility reasons
-       *)
-    ~default:true
-    "Nullsafe: Unless @Nullsafe annotation is used, treat not annotated third party method params \
-     as if they were annotated as nullable, and return values as if they were annotated as \
-     non-null"
-
-
-and nullsafe_third_party_signatures =
-  CLOpt.mk_string_opt ~long:"nullsafe-third-party-signatures"
-    "Path to a folder with annotated signatures of third-party methods to be taken into account by \
-     nullsafe. Path is either relative to .inferconfig folder or absolute"
-
-
-and nullsafe_third_party_location_for_messaging_only =
-  CLOpt.mk_string_opt ~long:"nullsafe-third-party-location-for-messaging-only"
-    "Path to a folder with annotated signatures to include into error message. If not specified, \
-     path will be fetched from nullsafe-third-party-signatures. This param is only needed for the \
-     case when the real repository is located in the different place, and \
-     nullsafe-third-party-signatures contains only its copy (which can happen e.g. in case of \
-     caching by the build system)"
-
-
-and nullsafe_strict_containers =
-  CLOpt.mk_bool ~long:"nullsafe-strict-containers" ~default:false
-    "Warn when containers are used with nullable keys or values"
+and objc_synthesize_dealloc =
+  CLOpt.mk_bool ~long:"objc-synthesize-dealloc"
+    ~in_help:InferCommand.[(Capture, manual_clang)]
+    ~default:false
+    "If enabled, the capture tries to synthesize code in the dealloc methods of Objective-C \
+     classes corresponding to what the compiler does."
 
 
 and oom_threshold =
@@ -2185,11 +2339,6 @@ and _print_log_identifier =
   CLOpt.mk_bool ~long:"" ~deprecated:["-print-log-identifier"]
     ~deprecated_no:["-no-print-log-identifier"]
     "[DOES NOTHING] Print the unique identifier that is common to all logged events"
-
-
-and global_tenv =
-  CLOpt.mk_bool ~long:"global-tenv" "Print the global type environment."
-    ~in_help:InferCommand.[(Debug, manual_debug_global_tenv)]
 
 
 and print_using_diff =
@@ -2268,7 +2417,7 @@ and procedures_summary =
   CLOpt.mk_bool ~long:"procedures-summary" ~default:false
     ~in_help:InferCommand.[(Debug, manual_debug_procedures)]
     "Print the summaries of each procedure in the output of $(b,--procedures). See also \
-     $(b,--procedures-summary-nonempty)."
+     $(b,--procedures-summary-skip-empty)."
 
 
 and procedures_summary_json =
@@ -2289,6 +2438,12 @@ and process_clang_ast =
   CLOpt.mk_bool ~long:"process-clang-ast" ~default:false
     "process the ast to emit some info about the file with $(b,--test-determinator) or \
      $(b,--export-changed-functions) (Not available for Java)"
+
+
+and profiler_samples =
+  CLOpt.mk_path_opt ~long:"profiler-samples"
+    "File containing the profiler samples when Infer is run Test Determinator mode with \
+     $(b,--test-determinator)."
 
 
 and progress_bar =
@@ -2328,14 +2483,18 @@ and pulse_cut_to_one_path_procedures_pattern =
 
 
 and pulse_force_continue =
-  CLOpt.mk_bool ~long:"pulse-force-continue" ~default:false
+  CLOpt.mk_bool ~long:"pulse-force-continue" ~default:true
     "The code coming after a function call is not analyzed if the callee has no summary of type \
      ContinueProgram, which may happen if the callee implementation was hard to analyze. With this \
      option, we force the analysis to continue, treating the callee as an unknown function. (Note \
      that if the callee had latent issues, those keep being surfaced, as appropriate.) Activating \
      this option will increase the coverage of code that is analyzed, but may introduce false \
-     positives. It is intended to be used for debugging, to quickly assess if a false negative may \
-     be caused by lack of coverage."
+     positives."
+
+
+and pulse_havoc_arguments =
+  CLOpt.mk_bool ~long:"pulse-havoc-arguments" ~default:true
+    "Heuristically havoc arguments to unknown functions."
 
 
 and pulse_inline_global_init_func_pointer =
@@ -2347,6 +2506,18 @@ and pulse_inline_global_init_func_pointer =
 and pulse_intraprocedural_only =
   CLOpt.mk_bool ~long:"pulse-intraprocedural-only"
     "Disable inter-procedural analysis in Pulse. Used for experimentations only."
+
+
+and pulse_log_summary_count =
+  CLOpt.mk_bool ~long:"pulse-log-summary-count"
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Log the number of summaries (grouped by summary kind) for each analyzed procedure in Pulse. \
+     Results are put in JSON files under a 'pulse' subdirectory, one corresponding to each \
+     analysis job. Note that when joining the files, deduplication might be needed."
+
+
+and pulse_log_unknown_calls =
+  CLOpt.mk_bool ~long:"pulse-log-unknown-calls" "log calls to unknown functions in pulse in stats"
 
 
 and pulse_max_cfg_size =
@@ -2386,6 +2557,12 @@ and pulse_model_cheap_copy_type =
     "Regex of methods that should be cheap to copy in Pulse"
 
 
+and pulse_model_cheap_copy_type_list =
+  CLOpt.mk_string_list ~long:"pulse-model-cheap-copy-type-list" ~meta:"regex"
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Regex of methods that should be cheap to copy in Pulse"
+
+
 and pulse_model_free_pattern =
   CLOpt.mk_string_opt ~long:"pulse-model-free-pattern"
     ~in_help:InferCommand.[(Analyze, manual_pulse)]
@@ -2417,23 +2594,17 @@ and pulse_model_release_pattern =
     "Regex of methods that should be modelled as release in Pulse"
 
 
-and pulse_model_returns_copy_pattern =
-  CLOpt.mk_string_opt ~long:"pulse-model-returns-copy-pattern"
+and pulse_model_return_first_arg =
+  CLOpt.mk_string_opt ~long:"pulse-model-return-first-arg"
     ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Regex of methods that should be modelled as creating copies in Pulse"
+    "Regex of methods that should be modelled as returning the first argument in Pulse in terms of \
+     the source language semantics. Languages supported: Java, C, Objective-C"
 
 
 and pulse_model_return_nonnull =
   CLOpt.mk_string_opt ~long:"pulse-model-return-nonnull"
     ~in_help:InferCommand.[(Analyze, manual_pulse)]
     "Regex of methods that should be modelled as returning non-null in Pulse"
-
-
-and pulse_model_return_first_arg =
-  CLOpt.mk_string_opt ~long:"pulse-model-return-first-arg"
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Regex of methods that should be modelled as returning the first argument in Pulse in terms of \
-     the source language semantics. Languages supported: Java, C, Objective-C"
 
 
 and pulse_model_return_this =
@@ -2443,8 +2614,20 @@ and pulse_model_return_this =
      instance method in Pulse. Languages supported: Java, Objective-C"
 
 
+and pulse_model_returns_copy_pattern =
+  CLOpt.mk_string_opt ~long:"pulse-model-returns-copy-pattern"
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Regex of methods that should be modelled as creating copies in Pulse"
+
+
 and pulse_model_skip_pattern =
   CLOpt.mk_string_opt ~long:"pulse-model-skip-pattern"
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Regex of methods that should be modelled as \"skip\" in Pulse"
+
+
+and pulse_model_skip_pattern_list =
+  CLOpt.mk_string_list ~long:"pulse-model-skip-pattern-list"
     ~in_help:InferCommand.[(Analyze, manual_pulse)]
     "Regex of methods that should be modelled as \"skip\" in Pulse"
 
@@ -2497,6 +2680,47 @@ and pulse_model_transfer_ownership =
      are method or namespace::method"
 
 
+and ( pulse_monitor_transitive_callees
+    , pulse_monitor_transitive_missed_captures
+    , pulse_transitive_access_verbose ) =
+  let pulse_monitor_transitive_callees =
+    CLOpt.mk_bool ~long:"pulse-monitor-transitive-callees" ~default:false
+      "Record the transitive call resolutions and output them in PULSE_TRANSITIVE_ACCESS signals. \
+       Should only be used for debugging purpose due to its potential large size."
+  and pulse_monitor_transitive_missed_captures =
+    CLOpt.mk_bool ~long:"pulse-monitor-transitive-missed-captures" ~default:false
+      "Record the transitive name resolutions that may have been altered or have failed becaud a \
+       type was not captured. The list of types is output them in PULSE_TRANSITIVE_ACCESS signals. \
+       Should only be used for debugging purpose due to its potential large size."
+  in
+  let pulse_transitive_access_verbose =
+    CLOpt.mk_bool_group ~long:"pulse-transitive-access-verbose"
+      "Force the transitive-access analysis to be more verbose by ignoring the fields \
+       final_class_only and initial_caller_class_does_not_extend. Additionally, if no signal is \
+       found, still generate a fake one for each eligible entries. Also set \
+       $(b,--pulse-monitor-transitive-callees), $(b,--pulse-monitor-transitive-missed-captures) so \
+       that every signal gets extra information in report.json."
+      [pulse_monitor_transitive_callees; pulse_monitor_transitive_missed_captures]
+      []
+  in
+  ( pulse_monitor_transitive_callees
+  , pulse_monitor_transitive_missed_captures
+  , pulse_transitive_access_verbose )
+
+
+and pulse_nullsafe_report_npe =
+  CLOpt.mk_bool ~long:"pulse-nullsafe-report-npe" ~default:true
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Report null dereference issues on files marked @Nullsafe."
+
+
+and pulse_nullsafe_report_npe_as_separate_issue_type =
+  CLOpt.mk_bool ~long:"pulse-nullsafe-report-npe-as-separate-issue" ~default:false
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Report null dereference issues on files marked @Nullsafe as a separate \
+     NULLPTR_DEREFERENCE_IN_NULLSAFE_CLASS issue type."
+
+
 and pulse_prevent_non_disj_top =
   CLOpt.mk_bool ~long:"pulse-prevent-non-disj-top" ~default:false
     "Forcibly prevent non-disjunctive domain value from becoming top. Without this option, \
@@ -2521,15 +2745,15 @@ and pulse_report_flows_to_taint_sink =
     ~meta:"procname" "Report data flows which pass through taint sink $(b,procname)"
 
 
+and pulse_report_issues_for_tests =
+  CLOpt.mk_bool ~long:"pulse-report-issues-for-tests" ~default:false
+    "Do not suppress any of the issues found by Pulse."
+
+
 and pulse_report_latent_issues =
   CLOpt.mk_bool ~long:"pulse-report-latent-issues" ~default:true
     "Report latent issues instead of waiting for them to become manifest, when the latent issue \
      itself is enabled."
-
-
-and pulse_report_issues_for_tests =
-  CLOpt.mk_bool ~long:"pulse-report-issues-for-tests" ~default:false
-    "Do not suppress any of the issues found by Pulse."
 
 
 and pulse_sanity_checks =
@@ -2543,22 +2767,50 @@ and pulse_skip_procedures =
     ~meta:"regex" "Regex of procedures that should not be analyzed by Pulse."
 
 
-and pulse_specialization_limit =
-  CLOpt.mk_int ~long:"pulse-specialization-limit" ~default:20
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Maximum number of summary specialization by procedure."
-
-
 and pulse_specialization_iteration_limit =
   CLOpt.mk_int ~long:"pulse-specialization-iteration-limit" ~default:20
     ~in_help:InferCommand.[(Analyze, manual_pulse)]
     "Maximum number of iterative summary specialization at each call site."
 
 
+and pulse_specialization_limit =
+  CLOpt.mk_int ~long:"pulse-specialization-limit" ~default:20
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Maximum number of summary specialization by procedure."
+
+
 and pulse_specialization_partial =
-  CLOpt.mk_bool ~long:"pulse-specialization-partial" ~default:false
+  CLOpt.mk_bool ~long:"pulse-specialization-partial" ~default:true
     "A caller does not wait to have a full set of specialization information before running a \
      specialized analysis of the callee."
+
+
+and pulse_taint_check_history =
+  CLOpt.mk_bool ~long:"pulse-taint-check-history" ~default:true
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Check values histories for taint events before reporting a taint issue. This is a temporary \
+     flag while the taint analysis transitions from being mainly attribute-based to being \
+     history-based."
+
+
+and pulse_taint_config =
+  CLOpt.mk_path_list ~long:"pulse-taint-config"
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Path to a taint analysis configuration file or a directory containing such files. This file \
+     can define $(b,--pulse-taint-sources), $(b,--pulse-taint-sanitizers), \
+     $(b,--pulse-taint-propagators), $(b,--pulse-taint-sinks), $(b,--pulse-taint-policies), and \
+     $(b,--pulse-taint-data-flow-kinds).\n\
+     If a path to a directory is given then the configuration files must have the `.json` \
+     extension. Any other file will be ignored. The subdirectories will be explored and must \
+     follow the same convention."
+
+
+and pulse_taint_data_flow_kinds =
+  CLOpt.mk_json ~long:"pulse-taint-data-flow-kinds"
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Specify which taint kinds should be used for data flow reporting only. If a source has such a \
+     kind, only data flows to sinks which originate at the source will be reported. If a sink has \
+     such a kind, only sensitive data flows to the sink will be reported."
 
 
 and pulse_taint_policies =
@@ -2569,21 +2821,15 @@ and pulse_taint_policies =
     "taint_flows": [{ "source_kinds": [<kinds>],
                       "sink_kinds": [<kinds>],
                       "sanitizer_kinds": [<kinds>] }],
-    "exclude_in": [<paths>]
+    "exclude_in": [<paths>],
+    "exclude_matching": [<regexps>]
   }
-where <kinds> are specified in taint source/sanitizer/sink matchers (see $(b,--pulse-taint-sources)). The fields "sanitizer_kinds" and "exclude_in" are optional (assumed to be empty), and a single policy can specify several taint flows using a list. The following policy is always enabled:
+where <kinds> are specified in taint source/sanitizer/sink matchers (see $(b,--pulse-taint-sources)). The fields "sanitizer_kinds", "exclude_in" and "exclude_matching" are optional (assumed to be empty), and a single policy can specify several taint flows using a list. The following policy is always enabled:
 { "short_description": "...",
   "taint_flows": [{ "source_kinds": ["Simple"],
                     "sink_kinds": ["Simple"],
                     "sanitizer_kinds": ["Simple"]  }]
 }|}
-
-
-and pulse_taint_sanitizers =
-  CLOpt.mk_json ~long:"pulse-taint-sanitizers"
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Quick way to specify simple sanitizers as a JSON objects. See $(b,--pulse-taint-sources) for \
-     the fields format documentation."
 
 
 and pulse_taint_propagators =
@@ -2593,11 +2839,32 @@ and pulse_taint_propagators =
      the fields format documentation."
 
 
+and pulse_taint_sanitizers =
+  CLOpt.mk_json ~long:"pulse-taint-sanitizers"
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Quick way to specify simple sanitizers as a JSON objects. See $(b,--pulse-taint-sources) for \
+     the fields format documentation."
+
+
+and pulse_taint_short_traces =
+  CLOpt.mk_bool ~long:"pulse-taint-short-traces" ~default:false
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Cut off taint traces as soon as a tainted value flows into a sink. This matters when the sink \
+     itself calls other sinks of the same kind and as long as the value flows from call to call, \
+     without this flag the trace would include the whole chain of calls."
+
+
 and pulse_taint_sinks =
   CLOpt.mk_json ~long:"pulse-taint-sinks"
     ~in_help:InferCommand.[(Analyze, manual_pulse)]
     "Quick way to specify simple sinks as a JSON objects. See $(b,--pulse-taint-sources) for the \
      fields format documentation."
+
+
+and pulse_taint_skip_sources =
+  CLOpt.mk_bool ~long:"pulse-taint-skip-sources" ~default:false
+    ~in_help:InferCommand.[(Analyze, manual_pulse)]
+    "Skip the analysis of methods declared as sources in the taint."
 
 
 and pulse_taint_sources =
@@ -2671,74 +2938,39 @@ and pulse_taint_sources =
   |}
 
 
-and pulse_taint_data_flow_kinds =
-  CLOpt.mk_json ~long:"pulse-taint-data-flow-kinds"
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Specify which taint kinds should be used for data flow reporting only. If a source has such a \
-     kind, only data flows to sinks which originate at the source will be reported. If a sink has \
-     such a kind, only sensitive data flows to the sink will be reported."
-
-
-and pulse_taint_config =
-  CLOpt.mk_path_list ~long:"pulse-taint-config"
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Path to a taint analysis configuration file or a directory containing such files. This file \
-     can define $(b,--pulse-taint-sources), $(b,--pulse-taint-sanitizers), \
-     $(b,--pulse-taint-propagators), $(b,--pulse-taint-sinks), $(b,--pulse-taint-policies), and \
-     $(b,--pulse-taint-data-flow-kinds).\n\
-     If a path to a directory is given then the configuration files must have the `.json` \
-     extension. Any other file will be ignored. The subdirectories will be explored and must \
-     follow the same convention."
-
-
-and pulse_taint_check_history =
-  CLOpt.mk_bool ~long:"pulse-taint-check-history" ~default:true
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Check values histories for taint events before reporting a taint issue. This is a temporary \
-     flag while the taint analysis transitions from being mainly attribute-based to being \
-     history-based."
-
-
-and pulse_taint_skip_sources =
-  CLOpt.mk_bool ~long:"pulse-taint-skip-sources" ~default:false
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Skip the analysis of methods declared as sources in the taint."
-
-
 and pulse_transitive_access_config =
-  CLOpt.mk_path_opt ~long:"pulse-transitive-access-config"
+  CLOpt.mk_path_list ~long:"pulse-transitive-access-config"
     {|Specifies the accesses that must be tracked and the entry methods.
     Here is an example of the intended JSON syntax:
 {
     "fieldnames_to_monitor": ["GlobalVARIABLES"],
-    "initial_caller_class_extends": "hack GlobalAccess::EventHandler",
-    "initial_caller_class_does_not_extend": ["hack GlobalAccess::Unsafe"]
+    "procnames_to_monitor": [
+      {
+        "class_names": ["GlobalAccess"],
+        "method_names": ["getGlobalData"]
+      },
+      {"class_name_regex": "SomeGlobals"}
+    ],
+    "contexts": [
+      {
+        "initial_caller_class_extends": ["GlobalAccess::EventHandler"],
+        "initial_caller_class_does_not_extend": ["GlobalAccess::Unsafe"],
+        "final_class_only": true
+      }
+    ]
 } |}
+
+
+and pulse_unsafe_malloc =
+  CLOpt.mk_bool ~long:"pulse-unsafe-malloc"
+    ~in_help:InferCommand.[(Analyze, manual_clang)]
+    "Assume that malloc(3) never returns null."
 
 
 and pulse_widen_threshold =
   CLOpt.mk_int ~long:"pulse-widen-threshold" ~default:3
     ~in_help:InferCommand.[(Analyze, manual_pulse)]
     "Stop exploring new paths after $(i,int) loop iterations"
-
-
-and pulse_nullsafe_report_npe =
-  CLOpt.mk_bool ~long:"pulse-nullsafe-report-npe" ~default:true
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Report null dereference issues on files marked @Nullsafe."
-
-
-and pulse_nullsafe_report_npe_as_separate_issue_type =
-  CLOpt.mk_bool ~long:"pulse-nullsafe-report-npe-as-separate-issue" ~default:false
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Report null dereference issues on files marked @Nullsafe as a separate \
-     NULLPTR_DEREFERENCE_IN_NULLSAFE_CLASS issue type."
-
-
-and pulse_log_summary_count =
-  CLOpt.mk_bool ~long:"pulse-log-summary-count"
-    ~in_help:InferCommand.[(Analyze, manual_pulse)]
-    "Log the number of summaries for each analyzed procedure in Pulse"
 
 
 and pure_by_default =
@@ -2753,34 +2985,10 @@ and python_builtin_models =
     "Specify .sil file to use as Python builtin models (uses bundled models by default)"
 
 
-and quandary_endpoints =
-  CLOpt.mk_json ~long:"quandary-endpoints"
-    ~in_help:InferCommand.[(Analyze, manual_quandary)]
-    "Specify endpoint classes for Quandary"
-
-
-and quandary_sanitizers =
-  CLOpt.mk_json ~long:"quandary-sanitizers"
-    ~in_help:InferCommand.[(Analyze, manual_quandary)]
-    "Specify custom sanitizers for Quandary"
-
-
-and quandary_show_passthroughs =
-  CLOpt.mk_bool ~deprecated:["-passthroughs"] ~long:"quandary-show-passthroughs" ~default:false
-    "In error traces, show intermediate steps that propagate data. When false, error traces are \
-     shorter and show only direct flow via souces/sinks"
-
-
-and quandary_sources =
-  CLOpt.mk_json ~long:"quandary-sources"
-    ~in_help:InferCommand.[(Analyze, manual_quandary)]
-    "Specify custom sources for Quandary"
-
-
-and quandary_sinks =
-  CLOpt.mk_json ~long:"quandary-sinks"
-    ~in_help:InferCommand.[(Analyze, manual_quandary)]
-    "Specify custom sinks for Quandary"
+and qualified_cpp_name_block_list =
+  CLOpt.mk_string_list ~long:"qualified-cpp-name-block-list" ~meta:"string"
+    ~in_help:InferCommand.[(Analyze, manual_generic)]
+    "Skip analyzing the procedures under the qualified cpp type name."
 
 
 and quiet =
@@ -2814,6 +3022,14 @@ and reactive =
      started"
 
 
+and reactive_capture =
+  CLOpt.mk_bool ~long:"reactive-capture"
+    ~in_help:InferCommand.[(Analyze, manual_generic)]
+    "Reactive capture: capture and analysis are interleaved. Currently this flag will only make \
+     the analysis generate a list of type names that were not found in the global tenv. The \
+     feature is only available for the Hack frontend for now."
+
+
 and reanalyze =
   CLOpt.mk_bool ~long:"reanalyze"
     "Rerun the analysis. Not compatible with $(b,--incremental-analysis) and \
@@ -2827,8 +3043,8 @@ and relative_path_backtrack =
      convert /my/source/File.java with project root /my/root into ../source/File.java"
 
 
-and remodel_class =
-  CLOpt.mk_string_opt ~long:"remodel-class"
+and _remodel_class =
+  CLOpt.mk_string_opt ~long:"" ~deprecated:["-remodel-class"]
     "Specify a Remodel class name. For sub-classes of the Remodel class in ObjC, setters and \
      getters for properties are auto-generated and they store/load values into/from field names of \
      \"_<property name>\"."
@@ -2887,6 +3103,26 @@ and ( report_block_list_files_containing
       ~meta:"path_regex" ()
   , mk_filtering_option ~suffix:"suppress-errors" ~help:"do not report a type of errors"
       ~meta:"error_name" () )
+
+
+and report_block_list_spec =
+  CLOpt.mk_json ~long:"report-block-list-spec"
+    ~in_help:InferCommand.[(Report, manual_generic); (Run, manual_generic)]
+    {|Do not report the issues in this list.
+       Example format:
+        "report-block-list-spec": [
+            { "bug_type": "CXX_REF_CAPTURED_IN_BLOCK",
+              "procedure_name": "foo",
+              "file": "path/to/File.m"
+              "comment": "This is a fp because..."
+            },
+            { "bug_type": "RETAIN_CYCLE",
+              "class_name": "MyClass",
+              "procedure_name": "my_method"
+              "file": "path/to/File.m"
+            }
+        ]
+    |}
 
 
 and report_console_limit =
@@ -2959,15 +3195,15 @@ and sarif =
 
 
 and scheduler =
-  CLOpt.mk_symbol ~long:"scheduler" ~default:File ~eq:equal_scheduler
+  CLOpt.mk_symbol ~long:"scheduler" ~default:Restart ~eq:equal_scheduler
     ~in_help:InferCommand.[(Analyze, manual_scheduler)]
     ~symbols:scheduler_symbols
     "Specify the scheduler used for the analysis phase:\n\
-     - file: schedule one job per file\n\
-     - callgraph: schedule one job per procedure, following the syntactic call graph. Usually \
+     - file: schedules one job per file\n\
+     - callgraph: schedules one job per procedure, following the syntactic call graph. Usually \
      faster than \"file\".\n\
-     - restart: same as callgraph but uses locking to try and avoid duplicate work between \
-     different analysis processes and thus performs better in some circumstances"
+     - restart: schedules one job per procedure, using locking to try and avoid duplicate work \
+     between different analysis processes and thus performs generally better on high parallelism"
 
 
 and scope_leakage_config =
@@ -3005,31 +3241,12 @@ and scope_leakage_config =
     |}
 
 
-and select =
-  CLOpt.mk_string_opt ~long:"select" ~meta:"(N|all)"
-    ~in_help:InferCommand.[(Debug, manual_generic); (Explore, manual_explore_bugs)]
-    "Select option number $(i,N) or $(i,all) of them. If omitted, prompt for input."
-
-
-and scuba_logging, cost_scuba_logging, pulse_scuba_logging =
-  let scuba_logging = CLOpt.mk_bool ~long:"scuba-logging" "(direct) logging to scuba" in
-  let cost_scuba_logging =
-    CLOpt.mk_bool_group ~long:"cost-scuba-logging"
-      "Log unknown functions to scuba in cost/inferbo checkers; also sets $(b,--scuba-logging)."
-      [scuba_logging] []
-  in
-  let pulse_scuba_logging =
-    CLOpt.mk_bool_group ~long:"pulse-scuba-logging"
-      "Log unknown functions to scuba in pulse checkers; also sets $(b,--scuba-logging)."
-      [scuba_logging] []
-  in
-  (scuba_logging, cost_scuba_logging, pulse_scuba_logging)
-
-
 and scuba_execution_id =
   CLOpt.mk_int64_opt ~long:"scuba-execution-id"
     "Execution ID attached to all samples logged to scuba"
 
+
+and scuba_logging = CLOpt.mk_bool ~long:"scuba-logging" "(direct) logging to scuba"
 
 and scuba_normals =
   CLOpt.mk_string_map ~long:"scuba-normal"
@@ -3042,98 +3259,17 @@ and scuba_tags =
      <name>=(<value>,<value>,<value>|NONE)"
 
 
+and select =
+  CLOpt.mk_string_opt ~long:"select" ~meta:"(N|all)"
+    ~in_help:InferCommand.[(Debug, manual_generic); (Explore, manual_explore_bugs)]
+    "Select option number $(i,N) or $(i,all) of them. If omitted, prompt for input."
+
+
 and shrink_analysis_db =
   CLOpt.mk_bool ~long:"shrink-analysis-db"
     ~in_help:InferCommand.[(Analyze, manual_generic)]
     "After analysis, delete analysis summaries (but not report summaries) and vacuum analysis \
      database."
-
-
-and specialized_proc_depth =
-  CLOpt.mk_int ~long:"specialized-proc-depth" ~default:2
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "Maximal depth for the specialized procedures created."
-
-
-and lineage_include_builtins =
-  CLOpt.mk_bool
-    ~deprecated:["-simple-lineage-include-builtins"]
-    ~long:"lineage-include-builtins"
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "Include call/return edges to/from procedures that model primitive Erlang operations, such as \
-     constructing a list."
-
-
-and lineage_field_depth =
-  CLOpt.mk_int ~deprecated:["-simple-lineage-field-depth"] ~long:"lineage-field-depth" ~default:0
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "[EXPERIMENTAL] Maximal field depth sensitivity for lineage analysis. 0 will make the analysis \
-     field insensitive."
-
-
-and lineage_prevent_cycles =
-  CLOpt.mk_bool
-    ~deprecated:["-simple-lineage-prevent-cycles"]
-    ~long:"lineage-prevent-cycles" ~default:false
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "[EXPERIMENTAL] If set, Lineage will stop distinguishing the fields of a variable when it \
-     notices recursive types (that is, a sub-field having the same type as one of its \
-     \"ancestors\")."
-
-
-and lineage_field_width =
-  CLOpt.mk_int_opt ~deprecated:["-simple-lineage-field-width"] ~long:"lineage-field-width"
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "[EXPERIMENTAL] Maximal width of structures for field sensitive lineage analysis. Structure \
-     that have a higher number of fields will be smashed into a single element. 0 will make the \
-     analysis field insensitive. If not set, field width will be unlimited."
-
-
-and lineage_variant_width =
-  CLOpt.mk_int ~long:"lineage-variant-width" ~default:20
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "Maximal width of variant types for lineage analysis. A variant type is the type of a variable \
-     whose value is within a statically known atom set. The width of the type is the cardinal of \
-     that atom set."
-
-
-and lineage_max_cfg_size =
-  CLOpt.mk_int_opt ~deprecated:["-simple-lineage-max-cfg-size"] ~long:"lineage-max-cfg-size"
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "If set, larger CFGs are skipped."
-
-
-and lineage_json_report =
-  CLOpt.mk_bool ~deprecated:["-simple-lineage-json-report"] ~long:"lineage-json-report"
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "Enable lineage report in JSON format."
-
-
-and lineage_dedup =
-  CLOpt.mk_bool ~deprecated:["-simple-lineage-dedup"] ~long:"lineage-dedup" ~default:true
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "In JSON output, attempt to print each entity at most once. This is the default. The only \
-     reason you may want to turn this off is to make hash collisions more visible; that is, cases \
-     in which distinct entities get assigned the same ID."
-
-
-and lineage_keep_temporaries =
-  CLOpt.mk_bool
-    ~deprecated:["-simple-lineage-keep-temporaries"]
-    ~long:"lineage-keep-temporaries"
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "Normally, lineage summaries do not mention temporary variables introduced while compiling the \
-     high-level code to Infer's IR (intermediate representation). If this option is enabled, then \
-     the lineage graph produced corresponds to Infer's IR."
-
-
-and lineage_seed =
-  CLOpt.mk_int ~deprecated:["-simple-lineage-seed"] ~long:"lineage-seed" ~default:123
-    ~in_help:InferCommand.[(Analyze, manual_lineage)]
-    "Set the random seed used for hashing. (Various entities that get reported need unique \
-     identifiers. To generate these unique identifiers, in a distributed way without \
-     communication, we use hashing. If you are unlucky and get collisions, you can try a different \
-     seed."
 
 
 and siof_check_iostreams =
@@ -3185,12 +3321,6 @@ and skip_translation_headers =
      string during capture."
 
 
-and source_preview =
-  CLOpt.mk_bool ~long:"source-preview" ~default:true
-    ~in_help:InferCommand.[(Explore, manual_explore_bugs)]
-    "print code excerpts around trace elements"
-
-
 and source_files =
   CLOpt.mk_bool ~long:"source-files"
     ~in_help:InferCommand.[(Debug, manual_debug_source_files)]
@@ -3232,10 +3362,11 @@ and source_files_filter =
      regular expressions."
 
 
-and source_files_type_environment =
-  CLOpt.mk_bool ~long:"source-files-type-environment"
+and source_files_freshly_captured =
+  CLOpt.mk_bool ~long:"source-files-freshly-captured"
     ~in_help:InferCommand.[(Debug, manual_debug_source_files)]
-    "Print the type environment of each source file in the output of $(b,--source-files)"
+    "Print whether the source file has been captured in the most recent capture phase in the \
+     output of $(b,--source-files)."
 
 
 and source_files_procedure_names =
@@ -3244,42 +3375,26 @@ and source_files_procedure_names =
     "Print the names of procedure of each source file in the output of $(b,--source-files)"
 
 
-and source_files_freshly_captured =
-  CLOpt.mk_bool ~long:"source-files-freshly-captured"
+and source_files_type_environment =
+  CLOpt.mk_bool ~long:"source-files-type-environment"
     ~in_help:InferCommand.[(Debug, manual_debug_source_files)]
-    "Print whether the source file has been captured in the most recent capture phase in the \
-     output of $(b,--source-files)."
+    "Print the type environment of each source file in the output of $(b,--source-files)"
 
 
-and sources = CLOpt.mk_string_list ~long:"sources" "Specify the list of source files"
+and source_preview =
+  CLOpt.mk_bool ~long:"source-preview" ~default:true
+    ~in_help:InferCommand.[(Explore, manual_explore_bugs)]
+    "print code excerpts around trace elements"
+
 
 and sourcepath = CLOpt.mk_string_opt ~long:"sourcepath" "Specify the sourcepath"
 
-and starvation_skip_analysis =
-  CLOpt.mk_json ~long:"starvation-skip-analysis"
-    "Specify combinations of class/method list that should be skipped during starvation analysis"
+and sources = CLOpt.mk_string_list ~long:"sources" "Specify the list of source files"
 
-
-and starvation_whole_program =
-  CLOpt.mk_bool ~long:"starvation-whole-program" ~default:false
-    "Run whole-program starvation analysis"
-
-
-and store_analysis_schedule =
-  CLOpt.mk_bool ~long:"store-analysis-schedule"
-    ~in_help:InferCommand.[(Analyze, manual_scheduler)]
-    "Store the analysis schedule for later replay, honoring $(b,--replay-analysis-schedule-file) \
-     if present. This can be useful to store a schedule done with one version of infer to load \
-     with another version of infer. There is no guarantee infer will be able to load the previous \
-     schedule but using this mechanism gives a higher chance of success compared with having to \
-     read the previous results database successfully as fewer datatypes are involved."
-
-
-and suppress_lint_ignore_types =
-  CLOpt.mk_bool ~long:"suppress-lint-ignore-types" ~default:false
-    "[DEPRECATED] Check only the presence of @SuppressLint but not the issues types specified as \
-     parameters to the annotations when deciding to suppress issues. Use for backwards \
-     compatibility only!"
+and _specialized_proc_depth =
+  CLOpt.mk_int ~long:"" ~deprecated:["-specialized_proc_depth"] ~default:2
+    ~in_help:InferCommand.[(Analyze, manual_lineage)]
+    "[DOES NOTHING] Used to set the maximal depth for the specialized procedures created."
 
 
 and sqlite_cache_size =
@@ -3290,18 +3405,11 @@ and sqlite_cache_size =
      SQLite PRAGMA."
 
 
-and sqlite_page_size =
-  CLOpt.mk_int ~long:"sqlite-page-size" ~default:32768
-    ~in_help:
-      InferCommand.[(Analyze, manual_generic); (Capture, manual_generic); (Run, manual_generic)]
-    "SQLite page size in bytes, must be a power of two between 512 and 65536."
-
-
 and sqlite_lock_timeout =
   (* some lame estimate: when the frontend writes CFGs to disk, it may take a few seconds to write
      one CFG and all the cores may be trying to write to the database at the same time. This means
      one process might wait (a few seconds) * (number of cores) to write its CFG. *)
-  let five_seconds_per_core = ncpu * 5_000 in
+  let five_seconds_per_core = Utils.cpus * 5_000 in
   CLOpt.mk_int ~long:"sqlite-lock-timeout" ~default:five_seconds_per_core
     ~default_to_string:(fun _ -> "five seconds times number of cores")
     ~in_help:
@@ -3330,7 +3438,77 @@ and sqlite_mmap_size =
     "Size of memory map for mmaped SQLite databases, zero value disables memory mapping."
 
 
+and sqlite_page_size =
+  CLOpt.mk_int ~long:"sqlite-page-size" ~default:32768
+    ~in_help:
+      InferCommand.[(Analyze, manual_generic); (Capture, manual_generic); (Run, manual_generic)]
+    "SQLite page size in bytes, must be a power of two between 512 and 65536."
+
+
 and sqlite_vfs = CLOpt.mk_string_opt ~long:"sqlite-vfs" "VFS for SQLite"
+
+and starvation_c_function_pointer_models =
+  CLOpt.mk_json ~long:"starvation-c-function-pointer-models"
+    "Specify target function for function pointers in C. For example\n\
+    \    given C code like this:\n\n\
+    \      void (*LOCK_M2_INDIRECTLY)(void) =  &lock_m2_indirectly;\n\n\
+    \    you could model it as `{'LOCK_M2_INDIRECTLY': 'lock_m2_indirectly'}`\n\
+    \    "
+
+
+and starvation_c_named_threads_annot =
+  CLOpt.mk_json ~long:"starvation-c-named-threads"
+    "Associate functions to threads. If two functions are associated to the same thread they \
+     cannot run together. For example {'foo': 'some_thread', 'bar': 'some_thread'} would indicate \
+     that foo and bar cannot run in parallel."
+
+
+and starvation_skip_analysis =
+  CLOpt.mk_json ~long:"starvation-skip-analysis"
+    "Specify combinations of class/method list that should be skipped during starvation analysis"
+
+
+and starvation_strict_mode =
+  CLOpt.mk_bool ~long:"starvation-strict-mode" ~default:true
+    "During starvation analysis, report strict mode violations (Android only)"
+
+
+and starvation_whole_program =
+  CLOpt.mk_bool ~long:"starvation-whole-program" ~default:false
+    "Run whole-program starvation analysis"
+
+
+and stats_dir_current =
+  CLOpt.mk_path_opt ~long:"stats-dir-current"
+    ~in_help:InferCommand.[(ReportDiff, manual_generic)]
+    "The infer-out/stats from the current run. Together with $(b,--stats-dir-previous), make \
+     $(i,infer reportdiff) compute the difference between two stats directories and output the \
+     results in infer-out/differential/stats_*.json files."
+
+
+and stats_dir_previous =
+  CLOpt.mk_path_opt ~long:"stats-dir-previous"
+    ~in_help:InferCommand.[(ReportDiff, manual_generic)]
+    "The infer-out/stats from a previous run. See $(b,--stats-dir-current)."
+
+
+and struct_as_cpp_class =
+  CLOpt.mk_bool ~long:"struct-as-cpp-class" ~default:false
+    ~in_help:InferCommand.[(Capture, manual_clang)]
+    "Translate C structs as C++ classes. This can be useful when analyzing C/C++ code to make sure \
+     struct global variables shared between C and C++ source files are treated as same variables\n\
+    \    "
+
+
+and store_analysis_schedule =
+  CLOpt.mk_bool ~long:"store-analysis-schedule"
+    ~in_help:InferCommand.[(Analyze, manual_scheduler)]
+    "Store the analysis schedule for later replay, honoring $(b,--replay-analysis-schedule-file) \
+     if present. This can be useful to store a schedule done with one version of infer to load \
+     with another version of infer. There is no guarantee infer will be able to load the previous \
+     schedule but using this mechanism gives a higher chance of success compared with having to \
+     read the previous results database successfully as fewer datatypes are involved."
+
 
 and subtype_multirange =
   CLOpt.mk_bool ~deprecated:["subtype_multirange"] ~long:"subtype-multirange" ~default:true
@@ -3348,10 +3526,36 @@ and summaries_caches_max_size =
     "The maximum amount of elements the summaries LRU caches can hold"
 
 
+and suppress_lint_ignore_types =
+  CLOpt.mk_bool ~long:"suppress-lint-ignore-types" ~default:false
+    "[DEPRECATED] Check only the presence of @SuppressLint but not the issues types specified as \
+     parameters to the annotations when deciding to suppress issues. Use for backwards \
+     compatibility only!"
+
+
+and tenv_json =
+  CLOpt.mk_path_opt ~long:"tenv-json"
+    ~in_help:InferCommand.[(Capture, manual_generic)]
+    ~meta:"file" "Path to TEnv json file"
+
+
 and test_determinator =
   CLOpt.mk_bool ~long:"test-determinator" ~default:false
     "Run infer in Test Determinator mode. It is used together with the $(b,--modified-lines) and \
      $(b,--profiler-samples) flags, which specify the relevant arguments."
+
+
+and testing_mode =
+  CLOpt.mk_bool
+    ~deprecated:["testing_mode"; "-testing_mode"; "tm"]
+    ~deprecated_no:["ntm"] ~long:"testing-mode"
+    "Mode for testing, where no headers are translated, and dot files are created (clang only)"
+
+
+and threadsafe_aliases =
+  CLOpt.mk_json ~long:"threadsafe-aliases"
+    ~in_help:InferCommand.[(Analyze, manual_racerd)]
+    "Specify custom annotations that should be considered aliases of @ThreadSafe"
 
 
 and timeout =
@@ -3360,6 +3564,12 @@ and timeout =
     ~in_help:[(Analyze, manual_generic); (Run, manual_generic)]
     "Time after which any checker (except biabduction) should give up analysing the current \
      function or method, in seconds"
+
+
+and top_longest_proc_duration_size =
+  CLOpt.mk_int_opt ~long:"top-longest-proc-duration-size" ~default:10
+    ~in_help:InferCommand.[(Analyze, manual_generic)]
+    "Number of procedures for which we track longest analysis duration info."
 
 
 and topl_max_conjuncts =
@@ -3383,42 +3593,6 @@ and topl_report_latent_issues =
      itself is enabled. (Similar to $(b,--pulse-report-latent-issues).)"
 
 
-and profiler_samples =
-  CLOpt.mk_path_opt ~long:"profiler-samples"
-    "File containing the profiler samples when Infer is run Test Determinator mode with \
-     $(b,--test-determinator)."
-
-
-and starvation_strict_mode =
-  CLOpt.mk_bool ~long:"starvation-strict-mode" ~default:true
-    "During starvation analysis, report strict mode violations (Android only)"
-
-
-and tenv_json =
-  CLOpt.mk_path_opt ~long:"tenv-json"
-    ~in_help:InferCommand.[(Capture, manual_generic)]
-    ~meta:"file" "Path to TEnv json file"
-
-
-and testing_mode =
-  CLOpt.mk_bool
-    ~deprecated:["testing_mode"; "-testing_mode"; "tm"]
-    ~deprecated_no:["ntm"] ~long:"testing-mode"
-    "Mode for testing, where no headers are translated, and dot files are created (clang only)"
-
-
-and threadsafe_aliases =
-  CLOpt.mk_json ~long:"threadsafe-aliases"
-    ~in_help:InferCommand.[(Analyze, manual_racerd)]
-    "Specify custom annotations that should be considered aliases of @ThreadSafe"
-
-
-and top_longest_proc_duration_size =
-  CLOpt.mk_int_opt ~long:"top-longest-proc-duration-size" ~default:10
-    ~in_help:InferCommand.[(Analyze, manual_generic)]
-    "Number of procedures for which we track longest analysis duration info."
-
-
 and trace_events =
   CLOpt.mk_bool ~long:"trace-events"
     (Printf.sprintf "Emit Chrome performance trace events in %s"
@@ -3431,10 +3605,6 @@ and trace_ondemand =
 
 and trace_topl =
   CLOpt.mk_bool ~long:"trace-topl" "Detailed tracing information during Topl analysis"
-
-
-and uninit_interproc =
-  CLOpt.mk_bool ~long:"uninit-interproc" "Run uninit check in the experimental interprocedural mode"
 
 
 and unix_fork =
@@ -3687,6 +3857,14 @@ let post_parsing_initialization command_opt =
   Option.value ~default:InferCommand.Run command_opt
 
 
+let join_patterns_list patterns =
+  if List.is_empty patterns then None else Some (String.concat ~sep:"\\|" patterns |> Str.regexp)
+
+
+let join_patterns ~pattern_opt ~pattern_list =
+  join_patterns_list (Option.to_list !pattern_opt @ RevList.to_list !pattern_list)
+
+
 let command =
   let command_opt, _usage_exit =
     CLOpt.parse ?config_file:inferconfig_file ~usage:exe_usage startup_action initial_command
@@ -3698,9 +3876,27 @@ let command =
 
 let rest = !rest
 
-and dynamic_dispatch_json_file_path = !dynamic_dispatch_json_file_path
+and abstract_pulse_models_for_erlang = !abstract_pulse_models_for_erlang
 
 and analysis_schedule_file = !analysis_schedule_file
+
+and annotation_reachability_apply_superclass_annotations =
+  !annotation_reachability_apply_superclass_annotations
+
+
+and annotation_reachability_custom_models = !annotation_reachability_custom_models
+
+and annotation_reachability_custom_pairs = !annotation_reachability_custom_pairs
+
+and annotation_reachability_expensive = !annotation_reachability_expensive
+
+and annotation_reachability_minimize_sources = !annotation_reachability_minimize_sources
+
+and annotation_reachability_no_allocation = !annotation_reachability_no_allocation
+
+and annotation_reachability_report_source_and_sink = !annotation_reachability_report_source_and_sink
+
+and append_buck_flavors = RevList.to_list !append_buck_flavors
 
 and biabduction_abs_struct = !biabduction_abs_struct
 
@@ -3710,13 +3906,13 @@ and biabduction_allow_leak = !biabduction_allow_leak
 
 and biabduction_array_level = !biabduction_array_level
 
-and biabduction_models_mode = !biabduction_models_mode
-
 and biabduction_iterations = !biabduction_iterations
 
 and biabduction_join_cond = !biabduction_join_cond
 
 and biabduction_memleak_buckets = !biabduction_memleak_buckets
+
+and biabduction_models_mode = !biabduction_models_mode
 
 and biabduction_monitor_prop_size = !biabduction_monitor_prop_size
 
@@ -3740,17 +3936,15 @@ and biabduction_worklist_mode = !biabduction_worklist_mode
 
 and biabduction_write_dotty = !biabduction_write_dotty
 
-and annotation_reachability_cxx = !annotation_reachability_cxx
+and bo_assume_void = !bo_assume_void
 
-and annotation_reachability_cxx_sources = !annotation_reachability_cxx_sources
+and bo_bottom_as_default = !bo_bottom_as_default
 
-and annotation_reachability_custom_pairs = !annotation_reachability_custom_pairs
-
-and append_buck_flavors = RevList.to_list !append_buck_flavors
-
-and bootclasspath = !bootclasspath
+and bo_context_sensitive_allocsites = !bo_context_sensitive_allocsites
 
 and bo_debug = !bo_debug
+
+and bo_exit_frontend_gener_vars = !bo_exit_frontend_gener_vars
 
 and bo_field_depth_limit = !bo_field_depth_limit
 
@@ -3758,13 +3952,7 @@ and bo_max_cfg_size = !bo_max_cfg_size
 
 and bo_sound_unknown_sets_join = !bo_sound_unknown_sets_join
 
-and bo_bottom_as_default = !bo_bottom_as_default
-
-and bo_context_sensitive_allocsites = !bo_context_sensitive_allocsites
-
-and bo_assume_void = !bo_assume_void
-
-and bo_exit_frontend_gener_vars = !bo_exit_frontend_gener_vars
+and bootclasspath = !bootclasspath
 
 and buck = !buck
 
@@ -3772,15 +3960,19 @@ and buck2_build_args = RevList.to_list !buck2_build_args
 
 and buck2_build_args_no_inline = RevList.to_list !buck2_build_args_no_inline_rev
 
+and buck2_bxl_capture_file_block_list = RevList.to_list !buck2_bxl_capture_file_block_list
+
 and buck2_bxl_target = !buck2_bxl_target
 
 and buck2_inferconfig_target = !buck2_inferconfig_target
 
+and buck2_infertoolchain_target = !buck2_infertoolchain_target
+
 and buck2_isolation_dir = !buck2_isolation_dir
 
-and buck2_use_bxl = !buck2_use_bxl
-
 and buck2_query_deps = !buck2_query_deps
+
+and buck2_root = match !buck2_root with Some root -> root | None -> !project_root
 
 and buck_block_list = RevList.to_list !buck_block_list
 
@@ -3818,11 +4010,7 @@ and buck_mode : BuckMode.t option =
       Some Java
 
 
-and buck2_root = match !buck2_root with Some root -> root | None -> !project_root
-
 and buck_targets_block_list = RevList.to_list !buck_targets_block_list
-
-and bxl_file_capture = !bxl_file_capture
 
 and capture = !capture
 
@@ -3865,19 +4053,19 @@ and clang_ast_file =
       None
 
 
+and clang_block_listed_flags = RevList.to_list !clang_block_listed_flags
+
+and clang_block_listed_flags_with_arg = RevList.to_list !clang_block_listed_flags_with_arg
+
 and clang_compilation_dbs = !clang_compilation_dbs
 
 and clang_compound_literal_init_limit = !clang_compound_literal_init_limit
 
 and clang_extra_flags = RevList.to_list !clang_extra_flags
 
-and clang_block_listed_flags = RevList.to_list !clang_block_listed_flags
-
-and clang_block_listed_flags_with_arg = RevList.to_list !clang_block_listed_flags_with_arg
-
-and clang_ignore_regex = !clang_ignore_regex
-
 and clang_idirafter_to_override_regex = Option.map ~f:Str.regexp !clang_idirafter_to_override_regex
+
+and clang_ignore_regex = Option.map ~f:Str.regexp !clang_ignore_regex
 
 and clang_isystem_to_override_regex = Option.map ~f:Str.regexp !clang_isystem_to_override_regex
 
@@ -3892,15 +4080,15 @@ and compaction_minimum_interval_s = !compaction_minimum_interval_s
 and complete_capture_from = !complete_capture_from
 
 and config_impact_config_field_patterns =
-  RevList.rev_map !config_impact_config_field_patterns ~f:Re.Str.regexp
+  RevList.rev_map !config_impact_config_field_patterns ~f:Str.regexp
 
 
 and config_impact_config_function_patterns =
-  RevList.rev_map !config_impact_config_function_patterns ~f:Re.Str.regexp
+  RevList.rev_map !config_impact_config_function_patterns ~f:Str.regexp
 
 
 and config_impact_config_param_patterns =
-  RevList.rev_map !config_impact_config_param_patterns ~f:Re.Str.regexp
+  RevList.rev_map !config_impact_config_param_patterns ~f:Str.regexp
 
 
 and config_impact_current = !config_impact_current
@@ -3923,15 +4111,15 @@ and continue_analysis = !continue_analysis
 
 and continue_capture = !continue
 
-and costs_current = !costs_current
-
 and cost_issues_tests = !cost_issues_tests
 
-and cost_scuba_logging = !cost_scuba_logging
-
-and costs_previous = !costs_previous
+and cost_log_unknown_calls = !cost_log_unknown_calls
 
 and cost_suppress_func_ptr = !cost_suppress_func_ptr
+
+and costs_current = !costs_current
+
+and costs_previous = !costs_previous
 
 and cxx = !cxx
 
@@ -3941,19 +4129,27 @@ and data_flow_queries_on_topl = RevList.to_list !data_flow_queries_on_topl
 
 and dbwriter = !dbwriter
 
+and debug_exceptions = !debug_exceptions
+
 and debug_level_analysis = !debug_level_analysis
 
 and debug_level_capture = !debug_level_capture
 
-and debug_level_test_determinator = !debug_level_test_determinator
+and debug_level_report = !debug_level_report
 
-and debug_exceptions = !debug_exceptions
+and debug_level_test_determinator = !debug_level_test_determinator
 
 and debug_mode = !debug
 
 and deduplicate = !deduplicate
 
 and dependency_mode = !dependencies
+
+and detach_analysis_dependency = !detach_analysis_dependency
+
+and dict_missing_key_var_block_list =
+  join_patterns_list (RevList.to_list !dict_missing_key_var_block_list)
+
 
 and developer_mode = !developer_mode
 
@@ -3967,25 +4163,21 @@ and dump_duplicate_symbols = !dump_duplicate_symbols
 
 and dump_textual = !dump_textual
 
-and abstract_pulse_models_for_erlang = !abstract_pulse_models_for_erlang
-
-and eradicate_condition_redundant = !eradicate_condition_redundant
-
-and eradicate_field_over_annotated = !eradicate_field_over_annotated
-
-and eradicate_return_over_annotated = !eradicate_return_over_annotated
-
-and eradicate_verbose = !eradicate_verbose
+and dynamic_dispatch_json_file_path = !dynamic_dispatch_json_file_path
 
 and erlang_ast_dir = !erlang_ast_dir
 
 and erlang_check_return = !erlang_check_return
 
+and erlang_list_unfold_depth = !erlang_list_unfold_depth
+
+and erlang_reliability = !erlang_reliability
+
 and erlang_skip_compile = !erlang_skip_compile
 
 and erlang_with_otp_specs = !erlang_with_otp_specs
 
-and erlang_list_unfold_depth = !erlang_list_unfold_depth
+and export_changed_functions = !export_changed_functions
 
 and external_java_packages = !external_java_packages
 
@@ -4009,11 +4201,6 @@ and force_delete_results_dir = !force_delete_results_dir
 
 and force_integration = !force_integration
 
-and from_json_report =
-  Option.value !from_json_report
-    ~default:(ResultsDirEntryName.get_path ~results_dir:!results_dir ReportJson)
-
-
 and from_json_config_impact_report =
   Option.value !from_json_config_impact_report
     ~default:(ResultsDirEntryName.get_path ~results_dir:!results_dir ReportConfigImpactJson)
@@ -4024,9 +4211,12 @@ and from_json_costs_report =
     ~default:(ResultsDirEntryName.get_path ~results_dir:!results_dir ReportCostsJson)
 
 
-and frontend_stats = !frontend_stats
+and from_json_report =
+  Option.value !from_json_report
+    ~default:(ResultsDirEntryName.get_path ~results_dir:!results_dir ReportJson)
 
-and function_pointer_specialization = !function_pointer_specialization
+
+and frontend_stats = !frontend_stats
 
 and frontend_tests = !frontend_tests
 
@@ -4034,13 +4224,26 @@ and generated_classes = !generated_classes
 
 and genrule_mode = !genrule_mode
 
-and hack_naming_table = !hack_naming_table
+and global_tenv = !global_tenv
 
 and hackc_binary = !hackc_binary
+
+and hack_builder_patterns =
+  let open Yojson.Safe.Util in
+  let json = !hack_builder_patterns in
+  let class_of j = j |> member "class" |> to_string in
+  let finalizers j = j |> member "finalizers" |> to_list |> List.map ~f:to_string in
+  let pattern j = (class_of j, finalizers j) in
+  json |> to_list |> List.map ~f:pattern
+
 
 and hack_builtin_models = !hack_builtin_models
 
 and hack_models = RevList.to_list !hack_models
+
+and hack_naming_table = !hack_naming_table
+
+and hack_verify_capture_only = !hack_verify_capture_only
 
 and help_checker =
   RevList.rev_map !help_checker ~f:(fun checker_string ->
@@ -4066,11 +4269,9 @@ and help_issue_type =
              See --list-issue-types for the list of all known issue types." id )
 
 
-and html = !html
-
 and hoisting_report_only_expensive = !hoisting_report_only_expensive
 
-and global_tenv = !global_tenv
+and html = !html
 
 and icfg_dotty_outfile = !icfg_dotty_outfile
 
@@ -4082,17 +4283,15 @@ and incremental_analysis = !incremental_analysis
 
 and inline_func_pointer_for_testing = !inline_func_pointer_for_testing
 
+and invalidate_only = !invalidate_only
+
 and issues_tests = !issues_tests
 
 and issues_tests_fields = !issues_tests_fields
 
-and invalidate_only = !invalidate_only
-
 and java_debug_source_file_info = !java_debug_source_file_info
 
 and java_jar_compiler = !java_jar_compiler
-
-and java_reflection = !java_reflection
 
 and java_source_parser_experimental = !java_source_parser_experimental
 
@@ -4102,21 +4301,75 @@ and javac_classes_out = !javac_classes_out
 
 and job_id = !job_id
 
-and jobs = Option.fold !max_jobs ~init:!jobs ~f:min
+and jobs = Option.value !jobs ~default:(min !max_jobs Utils.cpus)
+
+and keep_going = !keep_going
 
 and kotlin_capture = !kotlin_capture
+
+and lineage_source =
+  RevList.to_list !lineage_source
+  |> List.concat_map ~f:(String.split ~on:',')
+  |> List.filter ~f:(Fn.non String.is_empty)
+
+
+and lineage_sink =
+  RevList.to_list !lineage_sink
+  |> List.concat_map ~f:(String.split ~on:',')
+  |> List.filter ~f:(Fn.non String.is_empty)
+
+
+and lineage_sanitizers =
+  RevList.to_list !lineage_sanitizers
+  |> List.concat_map ~f:(String.split ~on:',')
+  |> List.filter ~f:(Fn.non String.is_empty)
+
+
+and lineage_limit = !lineage_limit
+
+and lineage_dedup = !lineage_dedup
+
+and lineage_field_depth = !lineage_field_depth
+
+and lineage_field_max_cfg_size = !lineage_field_max_cfg_size
+
+and lineage_field_width = !lineage_field_width
+
+and lineage_include_builtins = !lineage_include_builtins
+
+and lineage_json_report = !lineage_json_report
+
+and lineage_keep_temporaries = !lineage_keep_temporaries
+
+and lineage_max_cfg_size = !lineage_max_cfg_size
+
+and lineage_prevent_cycles = !lineage_prevent_cycles
+
+and lineage_seed = !lineage_seed
+
+and lineage_variant_width = !lineage_variant_width
+
+and list_categories = !list_categories
 
 and list_checkers = !list_checkers
 
 and list_issue_types = !list_issue_types
+
+and liveness_block_list_var_regex = Option.map ~f:Str.regexp !liveness_block_list_var_regex
 
 and liveness_dangerous_classes = !liveness_dangerous_classes
 
 and liveness_ignored_constant = RevList.to_list !liveness_ignored_constant
 
 and load_average =
-  match !load_average with None when !buck -> Some (float_of_int ncpu) | _ -> !load_average
+  match !load_average with None when !buck -> Some (float_of_int Utils.cpus) | _ -> !load_average
 
+
+and lock_model = !lock_model
+
+and log_pulse_disjunct_increase_after_model_call = !log_pulse_disjunct_increase_after_model_call
+
+and log_pulse_coverage = !log_pulse_coverage
 
 and log_missing_deps = !log_missing_deps
 
@@ -4152,27 +4405,11 @@ and no_translate_libs = not !headers
 
 and nullable_annotation = !nullable_annotation
 
-and nullsafe_annotation_graph = !nullsafe_annotation_graph
-
-and nullsafe_disable_field_not_initialized_in_nonstrict_classes =
-  !nullsafe_disable_field_not_initialized_in_nonstrict_classes
-
-
-and nullsafe_optimistic_third_party_in_default_mode =
-  !nullsafe_optimistic_third_party_in_default_mode
-
-
-and nullsafe_third_party_signatures = !nullsafe_third_party_signatures
-
-and nullsafe_third_party_location_for_messaging_only =
-  !nullsafe_third_party_location_for_messaging_only
-
-
-and nullsafe_strict_containers = !nullsafe_strict_containers
+and only_cheap_debug = !only_cheap_debug
 
 and oom_threshold = !oom_threshold
 
-and only_cheap_debug = !only_cheap_debug
+and objc_synthesize_dealloc = !objc_synthesize_dealloc
 
 and pmd_xml = !pmd_xml
 
@@ -4194,9 +4431,9 @@ and procedures = !procedures
 
 and procedures_attributes = !procedures_attributes
 
-and procedures_callees = !procedures_callees
-
 and procedures_call_graph = !procedures_call_graph
+
+and procedures_callees = !procedures_callees
 
 and procedures_cfg = !procedures_cfg
 
@@ -4215,6 +4452,8 @@ and procedures_summary_json = !procedures_summary_json
 and procedures_summary_skip_empty = !procedures_summary_skip_empty
 
 and process_clang_ast = !process_clang_ast
+
+and profiler_samples = !profiler_samples
 
 and progress_bar =
   let style =
@@ -4250,9 +4489,17 @@ and pulse_cut_to_one_path_procedures_pattern =
   Option.map ~f:Str.regexp !pulse_cut_to_one_path_procedures_pattern
 
 
+and pulse_force_continue = !pulse_force_continue
+
+and pulse_havoc_arguments = !pulse_havoc_arguments
+
 and pulse_inline_global_init_func_pointer = !pulse_inline_global_init_func_pointer
 
 and pulse_intraprocedural_only = !pulse_intraprocedural_only
+
+and pulse_log_summary_count = !pulse_log_summary_count
+
+and pulse_log_unknown_calls = !pulse_log_unknown_calls
 
 and pulse_max_cfg_size = !pulse_max_cfg_size
 
@@ -4264,7 +4511,10 @@ and pulse_model_abort = RevList.to_list !pulse_model_abort
 
 and pulse_model_alloc_pattern = Option.map ~f:Str.regexp !pulse_model_alloc_pattern
 
-and pulse_model_cheap_copy_type = Option.map ~f:Str.regexp !pulse_model_cheap_copy_type
+and pulse_model_cheap_copy_type =
+  join_patterns ~pattern_opt:pulse_model_cheap_copy_type
+    ~pattern_list:pulse_model_cheap_copy_type_list
+
 
 and pulse_model_free_pattern = Option.map ~f:Str.regexp !pulse_model_free_pattern
 
@@ -4274,15 +4524,17 @@ and pulse_model_realloc_pattern = Option.map ~f:Str.regexp !pulse_model_realloc_
 
 and pulse_model_release_pattern = Option.map ~f:Str.regexp !pulse_model_release_pattern
 
-and pulse_model_returns_copy_pattern = Option.map ~f:Str.regexp !pulse_model_returns_copy_pattern
-
 and pulse_model_return_first_arg = Option.map ~f:Str.regexp !pulse_model_return_first_arg
-
-and pulse_model_return_this = Option.map ~f:Str.regexp !pulse_model_return_this
 
 and pulse_model_return_nonnull = Option.map ~f:Str.regexp !pulse_model_return_nonnull
 
-and pulse_model_skip_pattern = Option.map ~f:Str.regexp !pulse_model_skip_pattern
+and pulse_model_return_this = Option.map ~f:Str.regexp !pulse_model_return_this
+
+and pulse_model_returns_copy_pattern = Option.map ~f:Str.regexp !pulse_model_returns_copy_pattern
+
+and pulse_model_skip_pattern =
+  join_patterns ~pattern_opt:pulse_model_skip_pattern ~pattern_list:pulse_model_skip_pattern_list
+
 
 and pulse_model_transfer_ownership_namespace, pulse_model_transfer_ownership =
   let models =
@@ -4307,15 +4559,15 @@ and pulse_model_transfer_ownership_namespace, pulse_model_transfer_ownership =
 
 and pulse_models_for_erlang = RevList.to_list !pulse_models_for_erlang
 
+and pulse_monitor_transitive_callees = !pulse_monitor_transitive_callees
+
+and pulse_monitor_transitive_missed_captures = !pulse_monitor_transitive_missed_captures
+
 and pulse_nullsafe_report_npe = !pulse_nullsafe_report_npe
 
 and pulse_nullsafe_report_npe_as_separate_issue_type =
   !pulse_nullsafe_report_npe_as_separate_issue_type
 
-
-and pulse_log_summary_count = !pulse_log_summary_count
-
-and pulse_force_continue = !pulse_force_continue
 
 and pulse_prevent_non_disj_top = !pulse_prevent_non_disj_top
 
@@ -4325,44 +4577,44 @@ and pulse_report_flows_from_taint_source = !pulse_report_flows_from_taint_source
 
 and pulse_report_flows_to_taint_sink = !pulse_report_flows_to_taint_sink
 
-and pulse_report_latent_issues = !pulse_report_latent_issues
-
 and pulse_report_issues_for_tests = !pulse_report_issues_for_tests
+
+and pulse_report_latent_issues = !pulse_report_latent_issues
 
 and pulse_sanity_checks = !pulse_sanity_checks
 
-and pulse_scuba_logging = !pulse_scuba_logging
-
 and pulse_skip_procedures = Option.map ~f:Str.regexp !pulse_skip_procedures
-
-and pulse_specialization_limit = !pulse_specialization_limit
 
 and pulse_specialization_iteration_limit = !pulse_specialization_iteration_limit
 
+and pulse_specialization_limit = !pulse_specialization_limit
+
 and pulse_specialization_partial = !pulse_specialization_partial
+
+and pulse_taint_check_history = !pulse_taint_check_history
 
 and pulse_taint_config =
   (* TODO: write our own json handling using [Yojson] directly as atdgen generated parsers ignore
      extra fields, meaning we won't report errors to users when they spell things wrong. *)
   let base_taint_config =
     let mk_matchers json_ref =
-      Pulse_config_j.matchers_of_string (Yojson.Basic.to_string !json_ref)
+      Pulse_config_j.matchers_of_string (Yojson.Safe.to_string !json_ref)
     in
     { sources= mk_matchers pulse_taint_sources
     ; sanitizers= mk_matchers pulse_taint_sanitizers
     ; propagators= mk_matchers pulse_taint_propagators
     ; sinks= mk_matchers pulse_taint_sinks
     ; policies=
-        Pulse_config_j.taint_policies_of_string (Yojson.Basic.to_string !pulse_taint_policies)
+        Pulse_config_j.taint_policies_of_string (Yojson.Safe.to_string !pulse_taint_policies)
     ; data_flow_kinds=
         Pulse_config_j.data_flow_kinds_of_string
-          (Yojson.Basic.to_string !pulse_taint_data_flow_kinds) }
+          (Yojson.Safe.to_string !pulse_taint_data_flow_kinds) }
   in
   let explore_file taint_config filepath =
     let json_list =
       match Utils.read_json_file filepath with
       | Ok json ->
-          Yojson.Basic.Util.to_assoc json
+          Yojson.Safe.Util.to_assoc json
       | Error msg ->
           L.die ExternalError "Could not read or parse Infer Pulse JSON config in %s:@\n%s@."
             filepath msg
@@ -4372,7 +4624,7 @@ and pulse_taint_config =
       | None ->
           old_entries
       | Some (_, taint_json) ->
-          let new_entries = parser (Yojson.Basic.to_string taint_json) in
+          let new_entries = parser (Yojson.Safe.to_string taint_json) in
           new_entries @ old_entries
     in
     let combine_matchers = combine_fields Pulse_config_j.matchers_of_string in
@@ -4404,11 +4656,17 @@ and pulse_taint_config =
           taint_config )
 
 
-and pulse_taint_check_history = !pulse_taint_check_history
+and pulse_taint_short_traces = !pulse_taint_short_traces
 
 and pulse_taint_skip_sources = !pulse_taint_skip_sources
 
-and pulse_transitive_access_config = !pulse_transitive_access_config
+and pulse_transitive_access_config = RevList.to_list !pulse_transitive_access_config
+
+and pulse_transitive_access_enabled = not (RevList.is_empty !pulse_transitive_access_config)
+
+and pulse_transitive_access_verbose = !pulse_transitive_access_verbose
+
+and pulse_unsafe_malloc = !pulse_unsafe_malloc
 
 and pulse_widen_threshold = !pulse_widen_threshold
 
@@ -4418,15 +4676,7 @@ and pyc_file = RevList.to_list !pyc_file
 
 and python_builtin_models = !python_builtin_models
 
-and quandary_endpoints = !quandary_endpoints
-
-and quandary_sanitizers = !quandary_sanitizers
-
-and quandary_show_passthroughs = !quandary_show_passthroughs
-
-and quandary_sources = !quandary_sources
-
-and quandary_sinks = !quandary_sinks
+and qualified_cpp_name_block_list = RevList.to_list !qualified_cpp_name_block_list
 
 and quiet = !quiet
 
@@ -4438,17 +4688,22 @@ and racerd_ignore_classes = RevList.to_list !racerd_ignore_classes |> String.Set
 
 and reactive_mode = !reactive
 
+and reactive_capture = !reactive_capture
+
 and reanalyze = !reanalyze
 
 and relative_path_backtrack = !relative_path_backtrack
-
-and remodel_class = !remodel_class
 
 and replay_analysis_schedule = !replay_analysis_schedule
 
 and replay_ondemand_should_error = !replay_ondemand_should_error
 
 and report = !report
+
+and report_block_list_spec =
+  Report_block_list_spec_j.report_block_list_specs_of_string
+    (Yojson.Safe.to_string !report_block_list_spec)
+
 
 and report_block_list_files_containing = RevList.to_list !report_block_list_files_containing
 
@@ -4462,9 +4717,9 @@ and report_force_relative_path = !report_force_relative_path
 
 and report_formatter = !report_formatter
 
-and report_path_regex_block_list = RevList.to_list !report_path_regex_block_list
-
 and report_path_regex_allow_list = RevList.to_list !report_path_regex_allow_list
+
+and report_path_regex_block_list = RevList.to_list !report_path_regex_block_list
 
 and report_previous = !report_previous
 
@@ -4504,39 +4759,11 @@ and show_buckets = !print_buckets
 
 and shrink_analysis_db = !shrink_analysis_db
 
-and specialized_proc_depth = !specialized_proc_depth
-
-and lineage_include_builtins = !lineage_include_builtins
-
-and lineage_field_depth = !lineage_field_depth
-
-and lineage_prevent_cycles = !lineage_prevent_cycles
-
-and lineage_field_width = !lineage_field_width
-
-and lineage_variant_width = !lineage_variant_width
-
-and lineage_max_cfg_size = !lineage_max_cfg_size
-
-and lineage_json_report = !lineage_json_report
-
-and lineage_dedup = !lineage_dedup
-
-and lineage_keep_temporaries = !lineage_keep_temporaries
-
-and lineage_seed = !lineage_seed
-
 and siof_check_iostreams = !siof_check_iostreams
 
 and siof_safe_methods = RevList.to_list !siof_safe_methods
 
-and skip_analysis_in_path =
-  match RevList.to_list !skip_analysis_in_path with
-  | [] ->
-      None
-  | regexps ->
-      Some (Str.regexp (String.concat ~sep:"\\|" regexps))
-
+and skip_analysis_in_path = join_patterns_list (RevList.to_list !skip_analysis_in_path)
 
 and skip_analysis_in_path_skips_compilation = !skip_analysis_in_path_skips_compilation
 
@@ -4545,8 +4772,6 @@ and skip_duplicated_types = !skip_duplicated_types
 and skip_non_capture_clang_commands = !skip_non_capture_clang_commands
 
 and skip_translation_headers = RevList.to_list !skip_translation_headers
-
-and source_preview = !source_preview
 
 and source_files = !source_files
 
@@ -4558,19 +4783,19 @@ and source_files_cfg = !source_files_cfg
 
 and source_files_filter = !source_files_filter
 
-and source_files_type_environment = !source_files_type_environment
+and source_files_freshly_captured = !source_files_freshly_captured
 
 and source_files_procedure_names = !source_files_procedure_names
 
-and source_files_freshly_captured = !source_files_freshly_captured
+and source_files_type_environment = !source_files_type_environment
 
-and sources = RevList.to_list !sources
+and source_preview = !source_preview
 
 and sourcepath = !sourcepath
 
-and sqlite_cache_size = !sqlite_cache_size
+and sources = RevList.to_list !sources
 
-and sqlite_page_size = !sqlite_page_size
+and sqlite_cache_size = !sqlite_cache_size
 
 and sqlite_lock_timeout = !sqlite_lock_timeout
 
@@ -4578,13 +4803,25 @@ and sqlite_max_blob_size = !sqlite_max_blob_size
 
 and sqlite_mmap_size = !sqlite_mmap_size
 
+and sqlite_page_size = !sqlite_page_size
+
 and sqlite_vfs = !sqlite_vfs
+
+and starvation_c_function_pointer_models = !starvation_c_function_pointer_models
+
+and starvation_c_named_threads_annot = !starvation_c_named_threads_annot
 
 and starvation_skip_analysis = !starvation_skip_analysis
 
 and starvation_strict_mode = !starvation_strict_mode
 
 and starvation_whole_program = !starvation_whole_program
+
+and stats_dir_current = !stats_dir_current
+
+and stats_dir_previous = !stats_dir_previous
+
+and struct_as_cpp_class = !struct_as_cpp_class
 
 and store_analysis_schedule = !store_analysis_schedule
 
@@ -4596,15 +4833,9 @@ and summaries_caches_max_size = !summaries_caches_max_size
 
 and suppress_lint_ignore_types = !suppress_lint_ignore_types
 
-and keep_going = !keep_going
-
 and tenv_json = !tenv_json
 
 and test_determinator = !test_determinator
-
-and export_changed_functions = !export_changed_functions
-
-and profiler_samples = !profiler_samples
 
 and testing_mode = !testing_mode
 
@@ -4643,8 +4874,6 @@ and trace_events = !trace_events
 and trace_ondemand = !trace_ondemand
 
 and trace_topl = !trace_topl
-
-and uninit_interproc = !uninit_interproc
 
 and unix_fork = !unix_fork
 
@@ -4744,6 +4973,6 @@ let is_originator =
 let toplevel_results_dir =
   if is_originator then (
     (* let subprocesses know where the toplevel process' results dir is *)
-    Unix.putenv ~key:infer_top_results_dir_env_var ~data:results_dir ;
+    Unix.putenv ~key:CLOpt.infer_top_results_dir_env_var ~data:results_dir ;
     results_dir )
-  else Sys.getenv infer_top_results_dir_env_var |> Option.value ~default:results_dir
+  else Sys.getenv CLOpt.infer_top_results_dir_env_var |> Option.value ~default:results_dir

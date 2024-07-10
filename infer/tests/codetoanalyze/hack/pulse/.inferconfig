@@ -1,13 +1,18 @@
 {
   "scheduler": "callgraph",
   "pulse-only": true,
-  "pulse-force-continue": true,
   "hack-models": [
     "models/test_models.sil",
     "models/test_models.hack"
   ],
+  "hack-builder-patterns": [
+    { "class": "TestBuilderBase", "finalizers": ["doFinalize", "altFinalize"]},
+    { "class": "MyBuilder", "finalizers": ["saveX"]}
+  ],
+  "pulse-taint-short-traces": true,
   "pulse-taint-sources": [
     { "procedure": "$root.Level1::taintSource" },
+    { "procedure": "$root.Level1::unknownTaintSource" },
     { "class_names": ["OuterFile"], "method_names": ["taintSource"] },
     { "class_names": ["OuterFileSuper"], "method_names": ["superTaintSource"] },
     { "class_names": ["Level5Base"], "method_names": ["getSuperContext"] },
@@ -23,7 +28,8 @@
     { "class_names": ["IntraFile::KnownClass"], "method_names": ["genTaintSource"], "kinds": ["IntraFile"]},
     { "class_names": ["Sanitizers::Source"], "method_names": ["getTainted"], "kinds": ["Sanitizers"]},
     { "class_names": ["Propagators::Source"], "method_names": ["getTainted"], "kinds": ["Propagators"]},
-    { "class_names": ["Exclusions::Source"], "method_names": ["get"], "kinds": ["Exclusions"]}
+    { "class_names": ["Exclusions::Source"], "method_names": ["get"], "kinds": ["Exclusions"]},
+    { "class_names": ["Traces::Source"], "method_names": ["get"], "kinds": ["Traces"]}
   ],
   "pulse-taint-sinks": [
     { "procedure": "explicitSinkAllArgs" },
@@ -39,7 +45,12 @@
     { "class_names": ["Shapes::ShapeLogger"], "method_names": ["logMixed"] },
     { "class_names": ["Sanitizers::Sink"], "procedure_regex": ".*", "kinds": ["Sanitizers"] },
     { "class_names": ["Propagators::Sink"], "procedure_regex": ".*", "kinds": ["Propagators"] },
-    { "class_names": ["Exclusions::Sink"], "procedure_regex": ".*", "kinds": ["Exclusions"] }
+    { "class_names": ["Exclusions::Sink"], "procedure_regex": ".*", "kinds": ["Exclusions"] },
+    { "class_names": ["Exclusions::SinkWithExcludedFunction"],
+      "procedure_regex": ".*",
+      "exclude_from_regex_names": ["excluded"],
+      "kinds": ["Exclusions"]
+    }
   ],
   "pulse-taint-sanitizers": [
     { "class_names": ["Sanitizers::San"], "procedure_regex": ".*", "kinds": ["Sanitizers"] }
@@ -58,14 +69,18 @@
     },
     {
       "short_description": "Taint flow with a propagator and any method sink",
-      "taint_flows": [{"source_kinds": ["Propagators"], "sink_kinds": ["BuiltinCatchAll"]}]
+      "taint_flows": [{"source_kinds": ["Propagators"], "sink_kinds": ["Propagators"]}]
     },
     {
       "short_description": "Check that exclude_in works",
       "taint_flows": [
         { "source_kinds": ["Exclusions"], "sink_kinds": ["Exclusions"] }
       ],
-      "exclude_in": ["exclusions"]
+      "exclude_in": ["exclude_in_file"]
+    },
+    {
+      "short_description": "Flow with catch-all sink and multiple traces",
+      "taint_flows": [{"source_kinds": ["Traces"], "sink_kinds": ["BuiltinCatchAll"]}]
     }
   ]
 }

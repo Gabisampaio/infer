@@ -20,14 +20,17 @@ let debug () =
         | Some tenv ->
             L.result "Global type environment:@\n@[<v>%a@]" Tenv.pp tenv ) ;
     ( if Config.procedures then
-        let filter = Lazy.force Filtering.procedures_filter in
+        let procedures_filter = Lazy.force Filtering.procedures_filter in
+        let summary_of proc_name =
+          Summary.OnDisk.get ~lazy_payloads:false AnalysisRequest.all proc_name
+        in
+        let filter source_file proc_name =
+          procedures_filter source_file proc_name
+          &&
+          if Config.procedures_summary_skip_empty then Option.is_some (summary_of proc_name)
+          else true
+        in
         if Config.procedures_summary || Config.procedures_summary_json then
-          let summary_of proc_name = Summary.OnDisk.get ~lazy_payloads:false proc_name in
-          let filter =
-            if Config.procedures_summary_skip_empty then fun source_file proc_name ->
-              filter source_file proc_name && Option.is_some (summary_of proc_name)
-            else filter
-          in
           let f_console_output proc_names =
             let pp_summary fmt proc_name =
               match summary_of proc_name with
@@ -39,7 +42,8 @@ let debug () =
             L.result "%t" (fun fmt -> List.iter proc_names ~f:(pp_summary fmt))
           in
           let json_of_summary proc_name =
-            Summary.OnDisk.get ~lazy_payloads:false proc_name |> Option.map ~f:Summary.yojson_of_t
+            Summary.OnDisk.get ~lazy_payloads:false AnalysisRequest.all proc_name
+            |> Option.map ~f:Summary.yojson_of_t
           in
           let f_json proc_names =
             Yojson.Safe.to_channel stdout (`List (List.filter_map ~f:json_of_summary proc_names)) ;
@@ -123,11 +127,12 @@ let explore () =
 let help () =
   if
     Config.(
-      list_checkers || list_issue_types || Option.is_some write_website
+      list_checkers || list_categories || list_issue_types || Option.is_some write_website
       || (not (List.is_empty help_checker))
       || not (List.is_empty help_issue_type) )
   then (
     if Config.list_checkers then Help.list_checkers () ;
+    if Config.list_categories then Help.list_categories () ;
     if Config.list_issue_types then Help.list_issue_types () ;
     if not (List.is_empty Config.help_checker) then Help.show_checkers Config.help_checker ;
     if not (List.is_empty Config.help_issue_type) then Help.show_issue_types Config.help_issue_type ;
@@ -257,27 +262,33 @@ let report () =
     ConfigImpactIssuesTest.write_from_json ~json_path:Config.from_json_config_impact_report
       ~out_path
   in
+  let lineage_taint_config =
+    let open Config in
+    LineageTaint.TaintConfig.parse ~lineage_source ~lineage_sink ~lineage_sanitizers ~lineage_limit
+  in
   match
     ( Config.issues_tests
     , Config.cost_issues_tests
     , Config.config_impact_issues_tests
     , Config.lineage_json_report
+    , lineage_taint_config
     , Config.merge_report
     , Config.merge_summaries
     , Config.pulse_report_flows_from_taint_source
     , Config.pulse_report_flows_to_taint_sink )
   with
-  | None, None, None, false, [], _, None, None ->
+  | None, None, None, false, None, [], _, None, None ->
       if not (List.is_empty Config.merge_summaries) then merge_summaries () ;
       Driver.report ()
-  | _, _, _, _, [], _, Some _, Some _ ->
+  | _, _, _, _, _, _, _, Some _, Some _ ->
       L.die UserError
         "Only one of '--pulse-report-flows-from-taint-source' and \
          '--pulse-report-flows-to-taint-sink' can be used.@\n"
   | ( out_path
     , cost_out_path
     , config_impact_out_path
-    , report_lineage
+    , report_lineage_json
+    , lineage_taint_config
     , []
     , []
     , taint_source
@@ -285,38 +296,44 @@ let report () =
       Option.iter out_path ~f:write_from_json ;
       Option.iter cost_out_path ~f:write_from_cost_json ;
       Option.iter config_impact_out_path ~f:write_from_config_impact_json ;
-      if report_lineage then ReportLineage.report () ;
+      if report_lineage_json then ReportLineage.report_json () ;
+      Option.iter lineage_taint_config ~f:ReportLineage.report_taint ;
       Option.iter taint_source
         ~f:(ReportDataFlows.report_data_flows_of_procname ~flow_type:FromSource) ;
       Option.iter taint_sink ~f:(ReportDataFlows.report_data_flows_of_procname ~flow_type:ToSink)
-  | None, None, None, false, _ :: _, [], None, None ->
+  | None, None, None, false, None, _ :: _, [], None, None ->
       merge_reports ()
-  | _, _, _, _, _ :: _, _, _, _ | _, _, _, _, _, _ :: _, _, _ ->
+  | _, _, _, _, _, _ :: _, _, _, _ | _, _, _, _, _, _, _ :: _, _, _ ->
       L.die UserError
         "Options '--merge-report' or '--merge-summaries' or '--merge-report-sumamries' cannot be \
          used with '--issues-tests', '--cost-issues-tests', '--config-impact-issues-tests', \
-         '--lineage-json-report', '--pulse-report-flows-from-taint-source', \
-         '--pulse-report-flows-to-taint-sink', or each other.@\n"
+         '--lineage-json-report', '--lineage-source', '--lineage-taint', \
+         '--pulse-report-flows-from-taint-source', '--pulse-report-flows-to-taint-sink', or each \
+         other.@\n"
 
 
 let report_diff () =
-  (* at least one report must be passed in input to compute differential *)
+  (* at least one pair of reports must be passed as input to compute a differential *)
+  let open Config in
   match
-    Config.
-      ( report_current
-      , report_previous
-      , costs_current
-      , costs_previous
-      , config_impact_current
-      , config_impact_previous )
+    ( Option.both report_current report_previous
+    , Option.both costs_current costs_previous
+    , Option.both config_impact_current config_impact_previous
+    , Option.both stats_dir_current stats_dir_previous )
   with
-  | None, None, None, None, None, None ->
+  | None, None, None, None ->
       L.die UserError
-        "Expected at least one argument among '--report-current', '--report-previous', \
-         '--costs-current', '--costs-previous', '--config-impact-current', and \
-         '--config-impact-previous'\n"
+        "Expected at least one pair of arguments among '--report-current'/'--report-previous', \
+         '--costs-current'/'--costs-previous', \
+         '--config-impact-current'/'--config-impact-previous', or \
+         '--stats-dir-current'/'--stats-dir-previous'"
   | _ ->
-      ReportDiff.reportdiff ~current_report:Config.report_current
-        ~previous_report:Config.report_previous ~current_costs:Config.costs_current
-        ~previous_costs:Config.costs_previous ~current_config_impact:Config.config_impact_current
-        ~previous_config_impact:Config.config_impact_previous
+      if
+        (is_some @@ Option.both report_current report_previous)
+        || (is_some @@ Option.both costs_current costs_previous)
+        || (is_some @@ Option.both config_impact_current config_impact_previous)
+      then
+        ReportDiff.reportdiff ~report_current ~report_previous ~costs_current ~costs_previous
+          ~config_impact_current ~config_impact_previous ;
+      Option.both stats_dir_previous stats_dir_current
+      |> Option.iter ~f:(fun (previous, current) -> StatsDiff.diff ~previous ~current)

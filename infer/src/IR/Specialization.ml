@@ -28,39 +28,56 @@ module HeapPath = struct
 
     let pp = pp
   end)
+
+  module Set = PrettyPrintable.MakePPSet (struct
+    type nonrec t = t [@@deriving compare]
+
+    let pp = pp
+  end)
 end
 
 module Pulse = struct
   module Aliases = struct
-    type t = Pvar.t list list [@@deriving equal, compare]
+    type t = HeapPath.t list list [@@deriving equal, compare]
 
     let pp fmt aliases =
-      let pp_alias fmt alias = Pp.seq ~sep:"=" (Pvar.pp Pp.text) fmt alias in
-      Pp.seq ~sep:"^" pp_alias fmt aliases
+      let pp_alias fmt alias = Pp.seq ~sep:" = " HeapPath.pp fmt alias in
+      Pp.seq ~sep:"@,&& " pp_alias fmt aliases
   end
 
   module DynamicTypes = struct
     type t = Typ.name HeapPath.Map.t [@@deriving equal, compare]
 
     let pp fmt dtypes = HeapPath.Map.pp ~pp_value:Typ.Name.pp fmt dtypes
-
-    module Set = PrettyPrintable.MakePPSet (struct
-      type nonrec t = t
-
-      let compare = HeapPath.Map.compare Typ.Name.compare_name
-
-      let pp = pp
-    end)
   end
 
-  type t = Aliases of Aliases.t | DynamicTypes of DynamicTypes.t [@@deriving equal, compare]
+  type t = {aliases: Aliases.t option; dynamic_types: DynamicTypes.t} [@@deriving equal, compare]
 
-  let pp fmt = function
-    | Aliases aliases ->
-        F.fprintf fmt "(alias) %a" Aliases.pp aliases
-    | DynamicTypes dtypes ->
-        F.fprintf fmt "(dynamic types) %a" DynamicTypes.pp dtypes
+  let bottom = {aliases= None; dynamic_types= HeapPath.Map.empty}
 
+  let is_empty {aliases; dynamic_types} =
+    Option.is_none aliases && HeapPath.Map.is_empty dynamic_types
+
+
+  let pp_aliases fmt = function
+    | None ->
+        F.pp_print_string fmt "none"
+    | Some aliases ->
+        Aliases.pp fmt aliases
+
+
+  let pp fmt {aliases; dynamic_types} =
+    F.fprintf fmt "@[@[alias: %a@],@ @[dynamic_types: %a@]@]" pp_aliases aliases DynamicTypes.pp
+      dynamic_types
+
+
+  module Set = PrettyPrintable.MakePPSet (struct
+    type nonrec t = t
+
+    let compare = compare
+
+    let pp = pp
+  end)
 
   module Map = PrettyPrintable.MakePPMap (struct
     type nonrec t = t
@@ -72,6 +89,21 @@ module Pulse = struct
 
   let is_pulse_specialization_limit_not_reached map =
     Map.cardinal map < Config.pulse_specialization_limit
+
+
+  let has_type_in_specialization {dynamic_types} specialized_type =
+    (* for Hack we don't care if type is Foo or Foo$static *)
+    let get_hack_static_companion_origin typ =
+      if Typ.Name.is_hack_class typ && Typ.Name.Hack.is_static_companion typ then
+        Typ.Name.Hack.static_companion_origin typ
+      else typ
+    in
+    HeapPath.Map.exists
+      (fun _ typ ->
+        let typ = get_hack_static_companion_origin typ in
+        let specialized_type = get_hack_static_companion_origin specialized_type in
+        Typ.Name.equal typ specialized_type )
+      dynamic_types
 end
 
 type t = Pulse of Pulse.t

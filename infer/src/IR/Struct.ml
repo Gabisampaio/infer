@@ -8,59 +8,72 @@
 open! IStd
 module F = Format
 
-type field = Fieldname.t * Typ.t * Annot.Item.t [@@deriving compare, equal, hash]
+type objc_property_attribute = Copy | Strong | Weak [@@deriving compare, equal, hash, normalize]
 
-type fields = field list [@@deriving equal, hash]
+type field =
+  { name: Fieldname.t
+  ; typ: Typ.t
+  ; annot: Annot.Item.t
+  ; objc_property_attributes: objc_property_attribute list }
+[@@deriving compare, equal, hash, normalize]
+
+let mk_field ?(annot = Annot.Item.empty) ?(objc_property_attributes = []) name typ =
+  {name; typ; annot; objc_property_attributes}
+
+
+let field_has_weak field =
+  List.exists field.objc_property_attributes ~f:(fun attr ->
+      equal_objc_property_attribute attr Weak )
+
 
 type java_class_kind = Interface | AbstractClass | NormalClass
-[@@deriving equal, compare, hash, show {with_path= false}]
+[@@deriving equal, compare, hash, show {with_path= false}, normalize]
 
-type hack_class_kind = Class | Interface | Trait [@@deriving equal, hash, show {with_path= false}]
+type hack_class_kind = Class | AbstractClass | Interface | Trait | Alias
+[@@deriving equal, hash, show {with_path= false}, normalize]
 
 module ClassInfo = struct
   type t =
     | NoInfo
+    | CppClassInfo of {is_trivially_copyable: bool}
     | JavaClassInfo of
         { kind: java_class_kind  (** class kind in Java *)
         ; loc: Location.t option
               (** None should correspond to rare cases when it was impossible to fetch the location
                   in source file *) }
     | HackClassInfo of hack_class_kind
-  [@@deriving equal, hash, show {with_path= false}]
-
-  module Normalizer = HashNormalizer.Make (struct
-    type nonrec t = t [@@deriving equal, hash]
-
-    let normalize t =
-      match t with
-      | NoInfo ->
-          t
-      | HackClassInfo _ ->
-          t
-      | JavaClassInfo {kind; loc} ->
-          let loc' = Location.Normalizer.normalize_opt loc in
-          if phys_equal loc' loc then t else JavaClassInfo {kind; loc= loc'}
-  end)
+  [@@deriving equal, hash, show {with_path= false}, normalize]
 end
 
 (** Type for a structured value. *)
 type t =
-  { fields: fields  (** non-static fields *)
-  ; statics: fields  (** static fields *)
+  { fields: field list  (** non-static fields *)
+  ; statics: field list  (** static fields *)
   ; supers: Typ.Name.t list  (** superclasses *)
   ; objc_protocols: Typ.Name.t list  (** ObjC protocols *)
   ; methods: Procname.t list  (** methods defined *)
   ; exported_objc_methods: Procname.t list  (** methods in ObjC interface, subset of [methods] *)
   ; annots: Annot.Item.t  (** annotations *)
-  ; class_info: ClassInfo.t  (** present if and only if the class is Java or Hack *)
+  ; class_info: ClassInfo.t  (** present if and only if the class is C++, Java or Hack *)
   ; dummy: bool  (** dummy struct for class including static method *)
   ; source_file: SourceFile.t option  (** source file containing this struct's declaration *) }
-[@@deriving equal, hash]
+[@@deriving equal, hash, normalize]
 
 type lookup = Typ.Name.t -> t option
 
-let pp_field pe f (field_name, typ, ann) =
-  F.fprintf f "@\n\t\t%a %a %a" (Typ.pp_full pe) typ Fieldname.pp field_name Annot.Item.pp ann
+let pp_objc_property_attribute f attributes =
+  let s = match attributes with Copy -> "copy" | Strong -> "strong" | Weak -> "weak" in
+  F.fprintf f "%s" s
+
+
+let pp_objc_property_attributes f attrs =
+  if List.is_empty attrs then ()
+  else F.fprintf f "(%a)" (Pp.comma_seq pp_objc_property_attribute) attrs
+
+
+let pp_field pe f {name= field_name; typ; annot; objc_property_attributes} =
+  F.fprintf f "@\n\t\t%a %a %a %a" (Typ.pp_full pe) typ Fieldname.pp field_name Annot.Item.pp annot
+    pp_objc_property_attributes objc_property_attributes
 
 
 let pp pe name f
@@ -74,8 +87,9 @@ let pp pe name f
      ; class_info
      ; dummy
      ; source_file } [@warning "+missing-record-field-pattern"] ) =
-  let pp_field pe f (field_name, typ, ann) =
-    F.fprintf f "@;<0 2>%a %a %a" (Typ.pp_full pe) typ Fieldname.pp field_name Annot.Item.pp ann
+  let pp_field pe f {name; typ; annot; objc_property_attributes} =
+    F.fprintf f "@;<0 2>%a %a %a %a" (Typ.pp_full pe) typ Fieldname.pp name Annot.Item.pp annot
+      pp_objc_property_attributes objc_property_attributes
   in
   let seq pp fmt = function
     | [] ->
@@ -113,9 +127,9 @@ let pp pe name f
     source_file
 
 
-let compare_custom_field (fld, _, _) (fld', _, _) = Fieldname.compare fld fld'
+let compare_custom_field {name= fld} {name= fld'} = Fieldname.compare fld fld'
 
-let make_java_struct fields' statics' methods' supers' annots' class_info ?source_file dummy =
+let make_sorted_struct fields' statics' methods' supers' annots' class_info ?source_file dummy =
   let fields = List.dedup_and_sort ~compare:compare_custom_field fields' in
   let statics = List.dedup_and_sort ~compare:compare_custom_field statics' in
   let methods = List.dedup_and_sort ~compare:Procname.compare methods' in
@@ -153,8 +167,8 @@ let internal_mk_struct ?default ?fields ?statics ?methods ?exported_objc_methods
       ?(annots = default.annots) ?(dummy = default.dummy) ?source_file typename =
     let class_info = Option.value class_info ~default:ClassInfo.NoInfo in
     match typename with
-    | Typ.JavaClass _jclass ->
-        make_java_struct fields statics methods supers annots class_info ?source_file dummy
+    | Typ.JavaClass _ | Typ.HackClass _ | Typ.CSharpClass _ | Typ.PythonClass _ ->
+        make_sorted_struct fields statics methods supers annots class_info ?source_file dummy
     | _ ->
         { fields
         ; statics
@@ -180,7 +194,7 @@ let rec get_extensible_array_element_typ ~lookup (typ : Typ.t) =
     match lookup name with
     | Some {fields} -> (
       match List.last fields with
-      | Some (_, fld_typ, _) ->
+      | Some {typ= fld_typ} ->
           get_extensible_array_element_typ ~lookup fld_typ
       | None ->
           None )
@@ -198,7 +212,8 @@ let fld_typ_opt ~lookup fn (typ : Typ.t) =
   | Tstruct name -> (
     match lookup name with
     | Some {fields} ->
-        List.find ~f:(fun (f, _, _) -> Fieldname.equal f fn) fields |> Option.map ~f:snd3
+        List.find ~f:(fun {name= f} -> Fieldname.equal f fn) fields
+        |> Option.map ~f:(fun {typ} -> typ)
     | None ->
         None )
   | _ ->
@@ -212,15 +227,15 @@ type field_info = {typ: Typ.t; annotations: Annot.Item.t; is_static: bool}
 
 let find_field field_list field_name_to_lookup =
   List.find_map
-    ~f:(fun (field_name, typ, annotations) ->
-      if Fieldname.equal field_name field_name_to_lookup then Some (typ, annotations) else None )
+    ~f:(fun {name; typ; annot} ->
+      if Fieldname.equal name field_name_to_lookup then Some (typ, annot) else None )
     field_list
 
 
 let get_field_info ~lookup field_name_to_lookup (typ : Typ.t) =
   let find_field_info field_list ~is_static =
     find_field field_list field_name_to_lookup
-    |> Option.map ~f:(fun (typ, annotations) -> {typ; annotations; is_static})
+    |> Option.map ~f:(fun (typ, annot) -> {typ; annotations= annot; is_static})
   in
   match typ.desc with
   | Tstruct name | Tptr ({desc= Tstruct name}, _) -> (
@@ -258,30 +273,12 @@ let rec is_subsumed ~compare lhs rhs =
       else (* [x > y] so it could be that [x] is in [ys] *) is_subsumed ~compare lhs ys
 
 
-let merge_dedup_sorted_lists ~compare lhs rhs =
-  let rec merge_dedup_sorted_lists_inner ~compare prev_opt lhs rhs =
-    match (lhs, rhs, prev_opt) with
-    | [], ys, _ ->
-        ys
-    | xs, [], _ ->
-        xs
-    | x :: xs, ys, Some last when Int.equal 0 (compare last x) ->
-        merge_dedup_sorted_lists_inner ~compare prev_opt xs ys
-    | xs, y :: ys, Some last when Int.equal 0 (compare last y) ->
-        merge_dedup_sorted_lists_inner ~compare prev_opt xs ys
-    | x :: xs, y :: ys, prev_opt -> (
-      match compare x y with
-      | 0 ->
-          (* first elements equal, drop lhs first and continue, keeping same [prev_opt] *)
-          merge_dedup_sorted_lists_inner ~compare prev_opt xs rhs
-      | r when r < 0 ->
-          (* first of lhs < first of rhs, keep [x] *)
-          x :: merge_dedup_sorted_lists_inner ~compare (Some x) xs rhs
-      | _ ->
-          (* first of lhs > first of rhs, keep [y] *)
-          y :: merge_dedup_sorted_lists_inner ~compare (Some y) lhs ys )
-  in
-  merge_dedup_sorted_lists_inner ~compare None lhs rhs
+let merge_dedup_sorted_lists ~compare ~newer ~current =
+  let equal a b = Int.equal 0 (compare a b) in
+  (* equal elements of [newer] will be first *)
+  List.merge ~compare newer current
+  |> (* we keep the last duplicate, thus from [current] *)
+  List.remove_consecutive_duplicates ~which_to_keep:`Last ~equal
 
 
 let merge_lists ~compare ~newer ~current =
@@ -293,7 +290,7 @@ let merge_lists ~compare ~newer ~current =
   | _, _ when is_subsumed ~compare newer current ->
       current
   | _, _ ->
-      merge_dedup_sorted_lists ~compare newer current
+      merge_dedup_sorted_lists ~compare ~newer ~current
 
 
 let merge_fields ~newer ~current = merge_lists ~compare:compare_custom_field ~newer ~current
@@ -355,6 +352,7 @@ let merge_class_info ~newer ~current =
       Logging.die InternalError "Tried to merge a JavaClassInfo with a HackClassInfo value.@\n"
 
 
+(* must only be used on structs made with [make_sorted_struct] *)
 let full_merge ~newer ~current =
   let fields = merge_fields ~newer:newer.fields ~current:current.fields in
   let statics = merge_fields ~newer:newer.statics ~current:current.statics in
@@ -377,7 +375,14 @@ let full_merge ~newer ~current =
 
 let merge typename ~newer ~current =
   match (typename : Typ.Name.t) with
-  | CStruct _ | CUnion _ | ErlangType _ | ObjcClass _ | ObjcProtocol _ | CppClass _ ->
+  | CStruct _
+  | CUnion _
+  | ErlangType _
+  | ObjcClass _
+  | ObjcProtocol _
+  | CppClass _
+  | ObjcBlock _
+  | CFunction _ ->
       if not (is_dummy newer) then newer else current
   | JavaClass _ when is_dummy newer ->
       current
@@ -426,66 +431,24 @@ let is_not_java_interface = function
 
 
 let is_hack_class {class_info} =
-  match (class_info : ClassInfo.t) with HackClassInfo Class -> true | _ -> false
+  match (class_info : ClassInfo.t) with
+  | HackClassInfo Class | HackClassInfo AbstractClass ->
+      true
+  | _ ->
+      false
+
+
+let is_hack_abstract_class {class_info} =
+  match (class_info : ClassInfo.t) with HackClassInfo AbstractClass -> true | _ -> false
 
 
 let is_hack_interface {class_info} =
   match (class_info : ClassInfo.t) with HackClassInfo Interface -> true | _ -> false
 
 
+let is_hack_alias {class_info} =
+  match (class_info : ClassInfo.t) with HackClassInfo Alias -> true | _ -> false
+
+
 let is_hack_trait {class_info} =
   match (class_info : ClassInfo.t) with HackClassInfo Trait -> true | _ -> false
-
-
-module FieldNormalizer = HashNormalizer.Make (struct
-  type t = field [@@deriving equal, hash]
-
-  let normalize f =
-    let field_name, typ, annot = f in
-    let field_name' = Fieldname.Normalizer.normalize field_name in
-    let typ' = Typ.Normalizer.normalize typ in
-    let annot' = Annot.Item.Normalizer.normalize annot in
-    if phys_equal field_name field_name' && phys_equal typ typ' && phys_equal annot annot' then f
-    else (field_name', typ', annot')
-end)
-
-module Normalizer = HashNormalizer.Make (struct
-  type nonrec t = t [@@deriving equal, hash]
-
-  let normalize t =
-    let fields = IList.map_changed ~equal:phys_equal ~f:FieldNormalizer.normalize t.fields in
-    let statics = IList.map_changed ~equal:phys_equal ~f:FieldNormalizer.normalize t.statics in
-    let supers = IList.map_changed ~equal:phys_equal ~f:Typ.Name.Normalizer.normalize t.supers in
-    let objc_protocols =
-      IList.map_changed ~equal:phys_equal ~f:Typ.Name.Normalizer.normalize t.objc_protocols
-    in
-    let methods = IList.map_changed ~equal:phys_equal ~f:Procname.Normalizer.normalize t.methods in
-    let exported_objc_methods =
-      IList.map_changed ~equal:phys_equal ~f:Procname.Normalizer.normalize t.exported_objc_methods
-    in
-    let annots = Annot.Item.Normalizer.normalize t.annots in
-    let class_info = ClassInfo.Normalizer.normalize t.class_info in
-    let source_file =
-      IOption.map_changed ~equal:phys_equal ~f:SourceFile.Normalizer.normalize t.source_file
-    in
-    if
-      phys_equal fields t.fields && phys_equal statics t.statics && phys_equal supers t.supers
-      && phys_equal objc_protocols t.objc_protocols
-      && phys_equal methods t.methods
-      && phys_equal exported_objc_methods t.exported_objc_methods
-      && phys_equal annots t.annots
-      && phys_equal class_info t.class_info
-      && phys_equal source_file t.source_file
-    then t
-    else
-      { fields
-      ; statics
-      ; supers
-      ; objc_protocols
-      ; methods
-      ; exported_objc_methods
-      ; annots
-      ; class_info
-      ; dummy= t.dummy
-      ; source_file }
-end)

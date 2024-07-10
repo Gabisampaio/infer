@@ -53,13 +53,15 @@ let sanitize_qualifier qualifier =
 
 
 let compute_hash =
-  let num_regexp = Re.Str.regexp "\\(:\\)[0-9]+" in
+  let num_regexp = Str.regexp ":[0-9]+\\(_[0-9a-f]+\\)?" in
+  let hack_closure_num_regexp = Str.regexp "[0-9]*\\.__invoke$" in
   fun ~(severity : string) ~(bug_type : string) ~(proc_name : Procname.t) ~(file : string)
       ~(qualifier : string) ->
     let base_filename = Filename.basename file in
     let hashable_procedure_name = Procname.hashable_name proc_name in
     let location_independent_proc_name =
-      Re.Str.global_replace num_regexp "$_" hashable_procedure_name
+      Str.global_replace num_regexp "$_" hashable_procedure_name
+      |> Str.replace_first hack_closure_num_regexp ".__invoke"
     in
     let location_independent_qualifier = sanitize_qualifier qualifier in
     Utils.better_hash
@@ -193,6 +195,35 @@ let is_in_clang_header source_file =
     ~substring:"/facebook-clang-plugins/clang/install/include/"
 
 
+let issue_in_report_block_list_specs ~file ~issue ~proc =
+  let is_in_report_block_list_spec ~file ~issue ~proc report_block_list_spec =
+    let filter_class =
+      match
+        (Procname.get_class_name proc, report_block_list_spec.Report_block_list_spec_t.class_name)
+      with
+      | Some class_name, Some fp_class_name ->
+          String.is_substring ~substring:fp_class_name class_name
+      | _ ->
+          true
+    in
+    let filter_proc =
+      let proc_name = Procname.get_method proc in
+      String.is_substring ~substring:report_block_list_spec.Report_block_list_spec_t.procedure_name
+        proc_name
+    in
+    let filter_file =
+      String.is_substring ~substring:report_block_list_spec.Report_block_list_spec_t.file
+        (SourceFile.to_rel_path file)
+    in
+    let filter_error =
+      String.equal issue.IssueType.unique_id
+        report_block_list_spec.Report_block_list_spec_t.bug_type
+    in
+    filter_class && filter_proc && filter_file && filter_error
+  in
+  List.exists ~f:(is_in_report_block_list_spec ~file ~issue ~proc) Config.report_block_list_spec
+
+
 module JsonIssuePrinter = MakeJsonListPrinter (struct
   type elt = json_issue_printer_typ
 
@@ -215,9 +246,14 @@ module JsonIssuePrinter = MakeJsonListPrinter (struct
       error_filter source_file err_key.issue_type
       && should_report_proc_name
       && should_report proc_name err_key.issue_type err_key.err_desc
-      && not (is_in_clang_header source_file)
+      && (not (is_in_clang_header source_file))
+      && should_report proc_name err_key.issue_type err_key.err_desc
+      && not
+           (issue_in_report_block_list_specs ~file:source_file ~issue:err_key.issue_type
+              ~proc:proc_name )
     then
       let severity = IssueType.string_of_severity err_key.severity in
+      let category = IssueType.string_of_category err_key.issue_type.category in
       let bug_type = err_key.issue_type.unique_id in
       let file =
         SourceFile.to_string ~force_relative:Config.report_force_relative_path source_file
@@ -248,6 +284,7 @@ module JsonIssuePrinter = MakeJsonListPrinter (struct
         { Jsonbug_j.bug_type
         ; qualifier
         ; severity
+        ; category
         ; suggestion
         ; line= err_data.loc.Location.line
         ; column= err_data.loc.Location.col
@@ -255,6 +292,8 @@ module JsonIssuePrinter = MakeJsonListPrinter (struct
         ; procedure_start_line
         ; file
         ; bug_trace= loc_trace_to_jsonbug_record err_data.loc_trace
+        ; bug_trace_length= Errlog.loc_trace_length err_data.loc_trace
+        ; bug_trace_max_depth= Errlog.loc_trace_max_depth err_data.loc_trace
         ; node_key= Option.map ~f:Procdesc.NodeKey.to_string err_data.node_key
         ; key= compute_key bug_type proc_name file
         ; hash= compute_hash ~severity ~bug_type ~proc_name ~file ~qualifier
@@ -374,13 +413,15 @@ let collect_issues proc_name proc_location_opt err_log issues_acc =
     err_log issues_acc
 
 
-let write_costs proc_name loc cost_opt (outfile : Utils.outfile) =
-  if
-    (not (Cost.is_report_suppressed proc_name))
-    && is_in_files_to_analyze loc
-    && (not (Procname.is_hack_builtins proc_name))
-    && not (SourceFile.is_matching [Str.regexp ".*.sil.*"] loc.Location.file)
-  then JsonCostsPrinter.pp outfile.fmt {loc; proc_name; cost_opt}
+let write_costs =
+  let sil_regexp = lazy (Str.regexp ".*.sil.*") in
+  fun proc_name loc cost_opt (outfile : Utils.outfile) ->
+    if
+      (not (Cost.is_report_suppressed proc_name))
+      && is_in_files_to_analyze loc
+      && (not (Procname.is_hack_builtins proc_name))
+      && not (SourceFile.is_matching [Lazy.force sil_regexp] loc.Location.file)
+    then JsonCostsPrinter.pp outfile.fmt {loc; proc_name; cost_opt}
 
 
 let write_config_impact proc_name loc config_impact_opt (outfile : Utils.outfile) =

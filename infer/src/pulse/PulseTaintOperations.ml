@@ -15,201 +15,6 @@ open TaintConfig
 module FuncArg = ProcnameDispatcher.Call.FuncArg
 module TaintItemMatcher = PulseTaintItemMatcher
 
-(** {2 Sources, sinks, and sanitizers} *)
-
-let fill_data_flow_kinds_from_config () =
-  Config.pulse_taint_config.data_flow_kinds
-  |> List.iter ~f:(fun kind -> Kind.of_string kind |> Kind.mark_data_flow_only)
-
-
-let fill_policies_from_config () =
-  Config.pulse_taint_config.policies
-  |> List.iter
-       ~f:(fun
-            {Pulse_config_t.short_description= description; taint_flows; privacy_effect; exclude_in}
-          ->
-         let policy_id = SinkPolicy.next_policy_id () in
-         List.iter taint_flows ~f:(fun {Pulse_config_t.source_kinds; sanitizer_kinds; sink_kinds} ->
-             let source_kinds = List.map source_kinds ~f:Kind.of_string in
-             let sanitizer_kinds = List.map sanitizer_kinds ~f:Kind.of_string in
-             List.iter sink_kinds ~f:(fun sink_kind_s ->
-                 let sink_kind = Kind.of_string sink_kind_s in
-                 let flow =
-                   { SinkPolicy.source_kinds
-                   ; sanitizer_kinds
-                   ; description
-                   ; policy_id
-                   ; privacy_effect
-                   ; exclude_in }
-                 in
-                 Hashtbl.update SinkPolicy.sink_policies sink_kind ~f:(function
-                   | None ->
-                       [flow]
-                   | Some flows ->
-                       flow :: flows ) ) ) )
-
-
-let () =
-  Hashtbl.add SinkPolicy.sink_policies ~key:Kind.simple_kind
-    ~data:
-      [ { SinkPolicy.description=
-            "Built-in Simple taint kind, matching any Simple source with any Simple sink except if \
-             any Simple sanitizer is in the way"
-        ; source_kinds= [Kind.simple_kind]
-        ; sanitizer_kinds= [Kind.simple_kind]
-        ; policy_id= SinkPolicy.next_policy_id ()
-        ; privacy_effect= None
-        ; exclude_in= None } ]
-  |> ignore ;
-  fill_data_flow_kinds_from_config () ;
-  fill_policies_from_config ()
-
-
-let get_procedure_field_matchers matchers ~field_matchers_allowed ~block_matchers_allowed
-    ~option_name =
-  let procedure_matchers, field_matchers =
-    List.partition_map matchers ~f:(fun matcher ->
-        match matcher with
-        | TaintConfig.Unit.ProcedureUnit procedure_matcher ->
-            Either.First procedure_matcher
-        | TaintConfig.Unit.FieldUnit field_unit ->
-            Either.Second field_unit )
-  in
-  let field_getters_matchers, field_setters_matchers =
-    List.partition_map field_matchers ~f:(fun (field_unit : TaintConfig.Unit.field_unit) ->
-        match field_unit.field_target with
-        | GetField ->
-            Either.First field_unit
-        | SetField ->
-            Either.Second field_unit )
-  in
-  let block_matchers, procedure_matchers =
-    List.partition_map procedure_matchers ~f:(fun (matcher : TaintConfig.Unit.procedure_unit) ->
-        match matcher.procedure_matcher with
-        | TaintConfig.Unit.Block _ | TaintConfig.Unit.BlockNameRegex _ ->
-            Either.First matcher
-        | _ ->
-            Either.Second matcher )
-  in
-  if (not field_matchers_allowed) && List.length field_matchers > 0 then
-    L.die UserError
-      "field_matchers are not allowed in the option %s but got the following\n   field matchers: %a"
-      option_name
-      (Pp.comma_seq TaintConfig.Unit.pp_field_unit)
-      field_matchers ;
-  if (not block_matchers_allowed) && List.length block_matchers > 0 then
-    L.die UserError
-      "block_matchers are not allowed in the option %s but got the following\n   block matchers: %a"
-      option_name
-      (Pp.comma_seq TaintConfig.Unit.pp_procedure_unit)
-      block_matchers ;
-  (procedure_matchers, block_matchers, field_getters_matchers, field_setters_matchers)
-
-
-let ( allocation_sources
-    , source_procedure_matchers
-    , source_block_matchers
-    , source_field_getters_matchers
-    , source_field_setters_matchers ) =
-  let option_name = "--pulse-taint-sources" in
-  let all_source_matchers =
-    TaintConfig.Unit.of_config ~default_taint_target:`ReturnValue ~option_name
-      Config.pulse_taint_config.sources
-  in
-  let allocation_sources, source_matchers =
-    List.partition_map all_source_matchers ~f:(fun matcher ->
-        match matcher with
-        | TaintConfig.Unit.ProcedureUnit {TaintConfig.Unit.procedure_matcher; kinds} -> (
-          match procedure_matcher with
-          | Allocation {class_name} ->
-              Either.First (class_name, kinds)
-          | _ ->
-              Either.Second matcher )
-        | _ ->
-            Either.Second matcher )
-  in
-  let procedure_matchers, block_matchers, field_getters_matchers, field_setters_matchers =
-    get_procedure_field_matchers source_matchers ~field_matchers_allowed:true
-      ~block_matchers_allowed:true ~option_name
-  in
-  ( allocation_sources
-  , procedure_matchers
-  , block_matchers
-  , field_getters_matchers
-  , field_setters_matchers )
-
-
-let sink_procedure_matchers, sink_field_getters_matchers, sink_field_setters_matchers =
-  let option_name = "--pulse-taint-sinks" in
-  let sink_matchers =
-    TaintConfig.Unit.of_config ~default_taint_target:`AllArguments ~option_name
-      Config.pulse_taint_config.sinks
-  in
-  let procedure_matchers, _, field_getters_matchers, field_setters_matchers =
-    get_procedure_field_matchers sink_matchers ~field_matchers_allowed:true
-      ~block_matchers_allowed:false ~option_name
-  in
-  (procedure_matchers, field_getters_matchers, field_setters_matchers)
-
-
-let sanitizer_matchers =
-  let option_name = "--pulse-taint-sanitizer" in
-  let sink_matchers =
-    TaintConfig.Unit.of_config ~default_taint_target:`AllArguments ~option_name
-      Config.pulse_taint_config.sanitizers
-  in
-  let procedure_matchers, _, _, _ =
-    get_procedure_field_matchers sink_matchers ~field_matchers_allowed:false
-      ~block_matchers_allowed:false ~option_name
-  in
-  procedure_matchers
-
-
-let propagator_matchers =
-  let option_name = "--pulse-taint-propagators" in
-  let propagator_matchers =
-    TaintConfig.Unit.of_config ~default_taint_target:`ReturnValue ~option_name
-      Config.pulse_taint_config.propagators
-  in
-  let procedure_matchers, _, _, _ =
-    get_procedure_field_matchers propagator_matchers ~field_matchers_allowed:false
-      ~block_matchers_allowed:false ~option_name
-  in
-  procedure_matchers
-
-
-let log_taint_config () =
-  L.debug Analysis Verbose "@\nSink policies:@\n%a@." SinkPolicy.pp_sink_policies
-    SinkPolicy.sink_policies ;
-  L.debug Analysis Verbose "Procedure source matchers:@\n%a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_procedure_unit)
-    source_procedure_matchers ;
-  L.debug Analysis Verbose "Block source matchers:@\n%a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_procedure_unit)
-    source_block_matchers ;
-  L.debug Analysis Verbose "Field getters source matchers:@\n%a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_field_unit)
-    source_field_getters_matchers ;
-  L.debug Analysis Verbose "Field setters source matchers:@\n%a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_field_unit)
-    source_field_setters_matchers ;
-  L.debug Analysis Verbose "Procedure sink matchers:@\n %a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_procedure_unit)
-    sink_procedure_matchers ;
-  L.debug Analysis Verbose "Field getters sink matchers:@\n %a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_field_unit)
-    sink_field_getters_matchers ;
-  L.debug Analysis Verbose "Field setters sink matchers:@\n %a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_field_unit)
-    sink_field_setters_matchers ;
-  L.debug Analysis Verbose "Sanitizer matchers:@\n%a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_procedure_unit)
-    sanitizer_matchers ;
-  L.debug Analysis Verbose "Propagator matchers:@\n%a@\n@."
-    (Pp.seq ~sep:"\n" TaintConfig.Unit.pp_procedure_unit)
-    propagator_matchers
-
-
 (** {2 Methods for applying taint to relevant values} *)
 
 let taint_value_origin (path : PathContext.t) location taint_item value_origin astate =
@@ -326,7 +131,7 @@ let taint_sources path location ~intra_procedural_only tainted astate =
                 AbstractValue.pp addr ;
               astate ) ) )
   in
-  L.d_with_indent "taint_sources" ~f:aux
+  L.with_indent "taint_sources" ~f:aux
 
 
 let taint_sanitizers path location tainted astate =
@@ -345,7 +150,7 @@ let taint_sanitizers path location tainted astate =
               (TaintSanitized (Attribute.TaintSanitizedSet.singleton taint_sanitized))
               astate ) )
   in
-  L.d_with_indent "taint_sanitizers" ~f:aux
+  L.with_indent "taint_sanitizers" ~f:aux
 
 
 let source_matches_sink_policy sink_kind {SinkPolicy.source_kinds= sink_sources} source_kind =
@@ -365,13 +170,29 @@ let source_is_sanitized source_times sink_policy
   is_sanitized_after_tainted && sanitizer_matches_sink_policy sink_policy sanitizer
 
 
-let exclude_in_loc source_file exclude_in =
-  match exclude_in with
-  | Some exclude_in ->
-      List.exists exclude_in ~f:(fun exclude_in ->
-          String.is_substring (SourceFile.to_string source_file) ~substring:exclude_in )
-  | _ ->
-      false
+let exclude_in_loc source_file exclude_in exclude_matching =
+  let source_file = SourceFile.to_string source_file in
+  let explicitly_excluded =
+    match exclude_in with
+    | Some exclude_in ->
+        List.exists exclude_in ~f:(fun exclude_in ->
+            String.is_substring source_file ~substring:exclude_in )
+    | _ ->
+        false
+  in
+  let excluded_by_regex =
+    match exclude_matching with
+    | Some exclude_matching ->
+        List.exists exclude_matching ~f:(fun exclude_matching ->
+            match Str.search_forward exclude_matching source_file 0 with
+            | _ ->
+                true
+            | exception Caml.Not_found ->
+                false )
+    | _ ->
+        false
+  in
+  explicitly_excluded || excluded_by_regex
 
 
 let check_source_against_sink_policy location ~source source_times intra_procedural_only hist
@@ -401,8 +222,10 @@ let check_source_against_sink_policy location ~source source_times intra_procedu
   let matching_sanitizers =
     Attribute.TaintSanitizedSet.filter (source_is_sanitized source_times sink_policy) sanitizers
   in
-  let {SinkPolicy.description; policy_id; privacy_effect; exclude_in} = sink_policy in
-  if exclude_in_loc location.Location.file exclude_in then (
+  let {SinkPolicy.description; policy_id; privacy_effect; exclude_in; exclude_matching} =
+    sink_policy
+  in
+  if exclude_in_loc location.Location.file exclude_in exclude_matching then (
     L.d_printfln ~color:Green "...but location %a should be excluded from reporting" SourceFile.pp
       location.Location.file ;
     None )
@@ -412,8 +235,9 @@ let check_source_against_sink_policy location ~source source_times intra_procedu
       hist ;
     (* No relevant taint events in value history -> skip reporting taint *)
     None )
-  else if Attribute.TaintSanitizedSet.is_empty matching_sanitizers then
-    Some (suspicious_source, sink_kind, description, policy_id, privacy_effect)
+  else if Attribute.TaintSanitizedSet.is_empty matching_sanitizers then (
+    L.d_printfln ~color:Red "Value history: %a" ValueHistory.pp hist ;
+    Some (suspicious_source, sink_kind, description, policy_id, privacy_effect) )
   else (
     L.d_printfln ~color:Green "...but sanitized by %a" Attribute.TaintSanitizedSet.pp
       matching_sanitizers ;
@@ -438,37 +262,8 @@ let check_policies ~sink ~source ~source_times ~intra_procedural_only ~hist ~san
   List.fold sink.TaintItem.kinds ~init:[] ~f:check_against_sink
 
 
-module TaintDependencies = struct
-  module G = Graph.Imperative.Digraph.Concrete (struct
-    type t = AbstractValue.t * (ValueHistory.t[@hash.ignore]) [@@deriving compare, equal, hash]
-  end)
-
-  type t = {root: G.vertex; graph: G.t}
-
-  let create root =
-    let graph = G.create () in
-    G.add_vertex graph root ;
-    {root; graph}
-
-
-  let add_edge {graph} v1 v2 = G.add_edge graph v1 v2
-
-  (* This iterates vertices with DFS order, but with additional stack'ed accumulation. *)
-  let fold {root; graph} ~init ~stack_init ~f =
-    let visited = ref AbstractValue.Set.empty in
-    let rec visit acc stack ((addr, _) as v) =
-      if AbstractValue.Set.mem addr !visited then Ok acc
-      else (
-        visited := AbstractValue.Set.add addr !visited ;
-        let* acc, stack = f acc stack v in
-        PulseResult.list_fold (G.succ graph v) ~init:acc ~f:(fun acc v -> visit acc stack v) )
-    in
-    visit init stack_init root
-end
-
 (** Preorder traversal of the tree formed by taint dependencies of [v] in [astate] *)
-let gather_taint_dependencies addr_hist0 astate =
-  let taint_dependencies = TaintDependencies.create addr_hist0 in
+let fold_taint_dependencies addr_hist0 astate ~init ~f =
   let visited = ref AbstractValue.Set.empty in
   let should_follow_access (access : Access.t) =
     (* NOTE: if the value is an array we propagate the check to the array elements. Similarly for
@@ -484,30 +279,54 @@ let gather_taint_dependencies addr_hist0 astate =
         true
     | FieldAccess _ ->
         Language.curr_language_is Hack || Language.curr_language_is Python
-    | TakeAddress | Dereference ->
+    | Dereference ->
         false
   in
-  let rec gather_taint_dependencies_aux ((from_addr, _) as from_addr_hist) =
+  let acc, sanitizers = f init Attribute.TaintSanitizedSet.empty addr_hist0 in
+  let acc_ref = ref acc in
+  let rec fold_taint_dependencies_aux sanitizers from_hist0 from_addr =
     if not (AbstractValue.Set.mem from_addr !visited) then (
       visited := AbstractValue.Set.add from_addr !visited ;
       (* Collect propagated taint from attributes *)
       Option.iter (AbductiveDomain.AddressAttributes.get_propagate_taint_from from_addr astate)
-        ~f:(fun taints_in ->
+        ~f:(fun (reason, taints_in) ->
           List.iter taints_in ~f:(fun Attribute.{v= to_v; history= to_h} ->
-              TaintDependencies.add_edge taint_dependencies from_addr_hist (to_v, to_h) ;
-              gather_taint_dependencies_aux (to_v, to_h) ) ) ;
+              let hist =
+                match (reason : Attribute.taint_propagation_reason) with
+                | UnknownCall ->
+                    (* for unknown calls [from_hist] should already contain the taint event *)
+                    L.d_printfln
+                      "Propagating from original history to %a (reason: %a), hist=[@[<hv>%a@]]"
+                      AbstractValue.pp to_v Attribute.pp_taint_propagation_reason reason
+                      ValueHistory.pp from_hist0 ;
+                    from_hist0
+                | UserConfig | InternalModel ->
+                    (* but if the taint was propagated then we need to fall back to the history
+                       present in the attribute even though it may not be accurate, because the
+                       propagation of the tainting event cannot be accurately propagated to
+                       histories *)
+                    L.d_printfln "Propagating from attribute to %a (reason: %a), hist=[@[<hv>%a@]]"
+                      AbstractValue.pp to_v Attribute.pp_taint_propagation_reason reason
+                      ValueHistory.pp to_h ;
+                    to_h
+              in
+              let acc, sanitizers = f !acc_ref sanitizers (to_v, hist) in
+              acc_ref := acc ;
+              fold_taint_dependencies_aux sanitizers from_hist0 to_v ) ) ;
       (* Collect taint from memory [from_addr_hist] points to *)
       AbductiveDomain.Memory.fold_edges from_addr astate ~init:()
         ~f:(fun () (access, (dest_addr, _)) ->
           if should_follow_access access then
             Option.iter (AbductiveDomain.Memory.find_edge_opt dest_addr Dereference astate)
               ~f:(fun deref_dest ->
-                TaintDependencies.add_edge taint_dependencies from_addr_hist deref_dest ;
-                gather_taint_dependencies_aux deref_dest )
-          else () ) )
+                L.d_printfln "Propagating from edges to %a, hist=[@[<hv>%a@]]" AbstractValue.pp
+                  (fst deref_dest) ValueHistory.pp (snd deref_dest) ;
+                let acc, sanitizers = f !acc_ref sanitizers deref_dest in
+                acc_ref := acc ;
+                fold_taint_dependencies_aux sanitizers (snd deref_dest) (fst deref_dest) ) ) )
   in
-  gather_taint_dependencies_aux addr_hist0 ;
-  taint_dependencies
+  fold_taint_dependencies_aux sanitizers (snd addr_hist0) (fst addr_hist0) ;
+  !acc_ref
 
 
 module LocationIntSet = PrettyPrintable.MakePPSet (struct
@@ -544,37 +363,38 @@ let dedup_reports results =
   List.map ~f:dedup_result results
 
 
-let check_flows_wrt_sink ?(policy_violations_reported = IntSet.empty) path location
+let check_flows_wrt_sink_ ?(policy_violations_to_report = (IntSet.empty, [])) path location
     ~sink:(sink_item, sink_trace) ~source astate =
   let source_value, _ = source in
   let source_expr = Decompiler.find source_value astate in
-  let mk_reportable_error diagnostic = [ReportableError {astate; diagnostic}] in
-  let check_tainted_flows policy_violations_reported sanitizers (v, hist) astate =
-    L.d_printfln "Checking that %a is not tainted" AbstractValue.pp v ;
+  let mk_reportable_error diagnostic = ReportableError {astate; diagnostic} in
+  let check_tainted_flows policy_violations_to_report sanitizers (v, hist) astate =
+    L.d_printfln "Checking that %a%a is not tainted" AbstractValue.pp v
+      (if Config.debug_level_analysis >= 3 then ValueHistory.pp else fun _ _ -> ())
+      hist ;
     let sources, new_sanitizers =
       AbductiveDomain.AddressAttributes.get_taint_sources_and_sanitizers v astate
     in
     let sanitizers = Attribute.TaintSanitizedSet.union sanitizers new_sanitizers in
-    Attribute.TaintedSet.fold
-      (fun {source; time_trace= source_times; hist= source_hist; intra_procedural_only}
-           policy_violations_reported_result ->
-        let* policy_violations_reported = policy_violations_reported_result in
-        L.d_printfln_escaped ~color:Red "Found source %a, checking policy..." TaintItem.pp source ;
-        let potential_policy_violations =
-          check_policies ~sink:sink_item ~source ~source_times ~intra_procedural_only ~hist
-            ~sanitizers ~location
-        in
-        let report_policy_violation reported_so_far
-            (source_kind, sink_kind, policy_description, violated_policy_id, policy_privacy_effect)
-            =
-          if IntSet.mem violated_policy_id reported_so_far then Ok reported_so_far
-          else
-            let flow_kind =
-              if TaintConfig.Kind.is_data_flow_only source_kind then Diagnostic.FlowToSink
-              else if TaintConfig.Kind.is_data_flow_only sink_kind then Diagnostic.FlowFromSource
-              else Diagnostic.TaintedFlow
-            in
-            Recoverable
+    ( Attribute.TaintedSet.fold
+        (fun {source; time_trace= source_times; hist= source_hist; intra_procedural_only}
+             policy_violations_to_report ->
+          L.d_printfln_escaped ~color:Red "Found source %a, checking policy..." TaintItem.pp source ;
+          let potential_policy_violations =
+            check_policies ~sink:sink_item ~source ~source_times ~intra_procedural_only ~hist
+              ~sanitizers ~location
+          in
+          let report_policy_violation (reported_so_far, policy_violations_to_report)
+              (source_kind, sink_kind, policy_description, violated_policy_id, policy_privacy_effect)
+              =
+            if IntSet.mem violated_policy_id reported_so_far then
+              (reported_so_far, policy_violations_to_report)
+            else
+              let flow_kind : Diagnostic.flow_kind =
+                if TaintConfig.Kind.is_data_flow_only source_kind then FlowToSink
+                else if TaintConfig.Kind.is_data_flow_only sink_kind then FlowFromSource
+                else TaintedFlow
+              in
               ( IntSet.add violated_policy_id reported_so_far
               , mk_reportable_error
                   (TaintFlow
@@ -585,26 +405,37 @@ let check_flows_wrt_sink ?(policy_violations_reported = IntSet.empty) path locat
                      ; flow_kind
                      ; policy_description
                      ; policy_id= violated_policy_id
-                     ; policy_privacy_effect } ) )
-        in
-        PulseResult.list_fold potential_policy_violations ~init:policy_violations_reported
-          ~f:report_policy_violation )
-      sources (Ok policy_violations_reported)
-    |> PulseResult.map ~f:(fun res -> (res, sanitizers))
+                     ; policy_privacy_effect } )
+                :: policy_violations_to_report )
+          in
+          List.fold potential_policy_violations ~init:policy_violations_to_report
+            ~f:report_policy_violation )
+        sources policy_violations_to_report
+    , sanitizers )
   in
-  L.d_with_indent "check flows wrt sink from %a (%a)" AbstractValue.pp source_value
+  L.with_indent "check flows wrt sink from %a (%a)" AbstractValue.pp source_value
     DecompilerExpr.pp_with_abstract_value source_expr ~collapsible:true ~f:(fun () ->
-      let taint_dependencies = gather_taint_dependencies source astate in
-      TaintDependencies.fold taint_dependencies ~init:(policy_violations_reported, astate)
-        ~stack_init:Attribute.TaintSanitizedSet.empty
-        ~f:(fun (policy_violations_reported, astate) sanitizers ((addr, _) as addr_hist) ->
+      fold_taint_dependencies source astate ~init:(astate, policy_violations_to_report)
+        ~f:(fun (astate, policy_violations_to_report) sanitizers ((addr, _) as addr_hist) ->
           let astate =
             AbductiveDomain.AddressAttributes.add_taint_sink path sink_item sink_trace addr astate
           in
-          let+ policy_violations_reported, sanitizers =
-            check_tainted_flows policy_violations_reported sanitizers addr_hist astate
+          let policy_violations_to_report, sanitizers =
+            check_tainted_flows policy_violations_to_report sanitizers addr_hist astate
           in
-          ((policy_violations_reported, astate), sanitizers) ) )
+          ((astate, policy_violations_to_report), sanitizers) ) )
+
+
+let of_astate_with_accumulated_policy_violations (astate, (_policy_ids, policy_violations_to_report))
+    =
+  if List.is_empty policy_violations_to_report then Ok astate
+  else Recoverable (astate, policy_violations_to_report)
+
+
+(* for .mli: (implicitly) remove optional argument *)
+let check_flows_wrt_sink path location ~sink ~source astate =
+  check_flows_wrt_sink_ path location ~sink ~source astate
+  |> of_astate_with_accumulated_policy_violations
 
 
 let rec should_ignore_all_flows_to (potential_taint_value : TaintItem.value_tuple) =
@@ -626,20 +457,19 @@ let taint_sinks path location tainted astate =
           let v, history = ValueOrigin.addr_hist value_origin in
           let sink_trace = Trace.Immediate {location; history} in
           let visited = ref AbstractValue.Set.empty in
-          let open PulseResult.Let_syntax in
-          let rec mark_sinked policy_violations_reported ?access ~(sink : TaintItem.t) v hist astate
-              =
+          let rec mark_sinked policy_violations_to_report ?access ~(sink : TaintItem.t) v hist
+              astate =
             let is_closure = Option.is_some (AddressAttributes.get_closure_proc_name v astate) in
             if AbstractValue.Set.mem v !visited || is_closure then
-              Ok (policy_violations_reported, astate)
+              (astate, policy_violations_to_report)
             else (
               visited := AbstractValue.Set.add v !visited ;
               let sink_value_tuple =
                 match access with
-                | Some (MemoryAccess.FieldAccess fieldname) ->
+                | Some (Access.FieldAccess fieldname) ->
                     TaintItem.FieldOf
                       {name= Fieldname.get_field_name fieldname; value_tuple= sink.value_tuple}
-                | Some MemoryAccess.Dereference ->
+                | Some Access.Dereference ->
                     TaintItem.PointedToBy {value_tuple= sink.value_tuple}
                 | _ ->
                     sink.value_tuple
@@ -648,30 +478,29 @@ let taint_sinks path location tainted astate =
               let astate =
                 AbductiveDomain.AddressAttributes.add_taint_sink path new_sink sink_trace v astate
               in
-              let res =
-                check_flows_wrt_sink ~policy_violations_reported path location
+              let astate, policy_violations_to_report =
+                check_flows_wrt_sink_ ~policy_violations_to_report path location
                   ~sink:(new_sink, sink_trace) ~source:(v, hist) astate
               in
-              AbductiveDomain.Memory.fold_edges v astate ~init:res
-                ~f:(fun res (access, (v, hist)) ->
+              AbductiveDomain.Memory.fold_edges v astate ~init:(astate, policy_violations_to_report)
+                ~f:(fun ((astate, policy_violations_to_report) as res) (access, (v, hist)) ->
                   match access with
-                  | MemoryAccess.FieldAccess fieldname
+                  | Access.FieldAccess fieldname
                     when Fieldname.equal fieldname PulseOperations.ModeledField.internal_string
                          || Fieldname.equal fieldname
                               PulseOperations.ModeledField.internal_ref_count ->
                       res
                   | _ ->
-                      let* policy_violations_reported, astate = res in
-                      mark_sinked policy_violations_reported ~access ~sink:new_sink v hist astate )
+                      mark_sinked policy_violations_to_report ~access ~sink:new_sink v hist astate )
               )
           in
-          let+ _, astate = mark_sinked IntSet.empty ~sink v history astate in
-          astate )
+          mark_sinked (IntSet.empty, []) ~sink v history astate
+          |> of_astate_with_accumulated_policy_violations )
   in
-  L.d_with_indent "taint_sinks" ~f:aux
+  L.with_indent "taint_sinks" ~f:aux
 
 
-let propagate_to path location value_origin values call astate =
+let propagate_to path location reason value_origin values call astate =
   let v = ValueOrigin.value value_origin in
   let path_condition = astate.AbductiveDomain.path_condition in
   if PulseFormula.is_known_zero path_condition v then
@@ -679,12 +508,12 @@ let propagate_to path location value_origin values call astate =
   else
     let astate =
       if not (List.is_empty values) then
-        AbductiveDomain.AddressAttributes.add_one v
-          (PropagateTaintFrom
-             (List.map values ~f:(fun {FuncArg.arg_payload= value_origin} ->
-                  let v, history = ValueOrigin.addr_hist value_origin in
-                  Attribute.{v; history} ) ) )
-          astate
+        let taints_in =
+          List.map values ~f:(fun {FuncArg.arg_payload= value_origin} ->
+              let v, history = ValueOrigin.addr_hist value_origin in
+              Attribute.{v; history} )
+        in
+        AbductiveDomain.AddressAttributes.add_one v (PropagateTaintFrom (reason, taints_in)) astate
       else astate
     in
     fold_reachable_values value_origin astate ~f:(fun vo astate ->
@@ -739,7 +568,7 @@ let propagate_to path location value_origin values call astate =
             astate ) )
 
 
-let taint_propagators path location proc_name actuals tainted astate =
+let taint_propagators path location reason proc_name actuals tainted astate =
   let aux () =
     List.fold tainted ~init:astate ~f:(fun astate TaintItemMatcher.{value_origin} ->
         let v = ValueOrigin.value value_origin in
@@ -748,9 +577,9 @@ let taint_propagators path location proc_name actuals tainted astate =
               let actual = ValueOrigin.value actual_value_origin in
               not (AbstractValue.equal v actual) )
         in
-        propagate_to path location value_origin other_actuals (Call proc_name) astate )
+        propagate_to path location reason value_origin other_actuals (Call proc_name) astate )
   in
-  L.d_with_indent "taint_propagators" ~f:aux
+  L.with_indent "taint_propagators" ~f:aux
 
 
 let is_cpp_assignment_operator proc_name_opt =
@@ -866,20 +695,20 @@ let propagate_taint_for_unknown_calls tenv path location (return, return_typ)
     match Stack.find_opt return astate with
     | Some return_addr_hist when propagate_to_return ->
         let return_value_origin = ValueOrigin.OnStack {var= return; addr_hist= return_addr_hist} in
-        propagate_to path location return_value_origin actuals call astate
+        propagate_to path location UnknownCall return_value_origin actuals call astate
     | _ ->
         astate
   in
   let astate =
     match actuals with
     | {FuncArg.arg_payload= this} :: other_actuals when propagate_to_receiver ->
-        propagate_to path location this other_actuals call astate
+        propagate_to path location UnknownCall this other_actuals call astate
     | _ ->
         astate
   in
   match List.rev actuals with
   | {FuncArg.arg_payload= last} :: other_actuals when propagate_to_last_actual ->
-      propagate_to path location last other_actuals call astate
+      propagate_to path location UnknownCall last other_actuals call astate
   | _ ->
       astate
 
@@ -895,7 +724,9 @@ let pulse_models_to_treat_as_unknown_for_taint =
       { class_names= ["java.lang.StringBuilder"]
       ; method_names= ["append"; "delete"; "replace"; "setLength"] }
   ; ProcedureNameRegex
-      {name_regex= Str.regexp "std::basic_string<.*>::basic_string"; exclude_in= None} ]
+      { name_regex= Str.regexp "std::basic_string<.*>::basic_string"
+      ; exclude_in= None
+      ; exclude_names= None } ]
   |> List.map ~f:dummy_matcher_of_procedure_matcher
 
 
@@ -908,7 +739,7 @@ let should_treat_as_unknown_for_taint tenv ?proc_attributes proc_name =
 
 let call tenv path location return ~call_was_unknown (call : _ Either.t)
     (actuals : ValueOrigin.t FuncArg.t list) astate =
-  L.d_with_indent "taint operations -> call" ~f:(fun () ->
+  L.with_indent "taint operations -> call" ~f:(fun () ->
       match call with
       | First call_exp ->
           L.d_printfln "call to expression [unknown=%b]" call_was_unknown ;
@@ -944,17 +775,12 @@ let call tenv path location return ~call_was_unknown (call : _ Either.t)
           in
           let astate, propagator_matches = match_call propagator_matchers astate in
           let+ astate =
-            (* This is a bit of a hack to achieve the following: be able to specify taint policies
-               where the sink is 'any procedure except <these>'. <these> need to be marked as
-               propagators. *)
-            if List.is_empty propagator_matches then
-              let astate, tainted = match_call sink_procedure_matchers astate in
-              taint_sinks path location tainted astate
-            else Ok astate
+            let astate, tainted = match_call sink_procedure_matchers astate in
+            taint_sinks path location tainted astate
           in
           let astate, should_propagate_for_unknown =
             let new_state =
-              taint_propagators path location proc_name actuals propagator_matches astate
+              taint_propagators path location UserConfig proc_name actuals propagator_matches astate
             in
             (new_state, call_was_unknown && phys_equal astate new_state)
           in

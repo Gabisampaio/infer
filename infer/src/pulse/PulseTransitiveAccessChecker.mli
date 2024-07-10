@@ -7,14 +7,11 @@
 
 open! IStd
 
+val should_skip_call : Tenv.t -> Procname.t -> bool
+
 val record_load : Exp.t -> Location.t -> PulseExecutionDomain.t list -> PulseExecutionDomain.t list
 
 val record_call :
   Tenv.t -> Procname.t option -> Location.t -> PulseAbductiveDomain.t -> PulseAbductiveDomain.t
 
-val report_errors :
-     Tenv.t
-  -> Procdesc.t
-  -> Errlog.t
-  -> PulseAbductiveDomain.Summary.t PulseExecutionDomain.base_t list
-  -> unit
+val report_errors : _ InterproceduralAnalysis.t -> PulseSummary.summary -> unit

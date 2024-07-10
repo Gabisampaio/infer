@@ -28,6 +28,7 @@ type allocator =
   | CSharpResource of CSharpClassName.t
   | ObjCAlloc
   | HackAsync
+  | HackBuilderResource of HackClassName.t
 [@@deriving equal]
 
 val pp_allocator : F.formatter -> allocator -> unit
@@ -62,6 +63,10 @@ end
 
 module TaintSanitizedSet : PrettyPrintable.PPSet with type elt = TaintSanitized.t
 
+type taint_propagation_reason = InternalModel | UnknownCall | UserConfig
+
+val pp_taint_propagation_reason : F.formatter -> taint_propagation_reason -> unit
+
 module CopyOrigin : sig
   type t = CopyCtor | CopyAssignment | CopyToOptional | CopyInGetDefault
   [@@deriving compare, equal]
@@ -85,10 +90,28 @@ module ConfigUsage : sig
   type t = ConfigName of ConfigName.t | StringParam of {v: AbstractValue.t; config_type: string}
 end
 
+module Builder : sig
+  type t = Discardable | NonDiscardable [@@deriving compare, equal]
+
+  val pp : F.formatter -> t -> unit [@@warning "-unused-value-declaration"]
+end
+
 module UninitializedTyp : sig
-  type t = Value | Const of Fieldname.t [@@deriving compare, equal]
+  type t =
+    | Value
+    | Const of Fieldname.t
+    | DictMissingKey of {dict: DecompilerExpr.t; key: Fieldname.t}
+  [@@deriving compare, equal]
 
   val pp : F.formatter -> t -> unit
+end
+
+module ConstKeys : sig
+  type t
+
+  val singleton : Fieldname.t -> Timestamp.t * Trace.t -> t
+
+  val fold : (Fieldname.t -> Timestamp.t * Trace.t -> 'a -> 'a) -> t -> 'a -> 'a
 end
 
 type t =
@@ -98,23 +121,27 @@ type t =
   | AlwaysReachable
   | Closure of Procname.t
   | ConfigUsage of ConfigUsage.t
-  | ConstString of string
   | CopiedInto of CopiedInto.t  (** records the copied var/field for each source address *)
   | CopiedReturn of
       {source: AbstractValue.t; is_const_ref: bool; from: CopyOrigin.t; copied_location: Location.t}
       (** records the copied value for the return address *)
-  | DynamicType of Typ.t * SourceFile.t option
+  | DictContainConstKeys
+      (** the dictionary contains only constant keys (note: only string constant is supported for
+          now) *)
+  | DictReadConstKeys of ConstKeys.t  (** constant string keys that are read from the dictionary *)
   | EndOfCollection
+  | HackBuilder of Builder.t
+  | InReportedRetainCycle
   | Initialized
   | Invalid of Invalidation.t * Trace.t
+  | LastLookup of AbstractValue.t
   | MustBeInitialized of Timestamp.t * Trace.t
   | MustBeValid of Timestamp.t * Trace.t * Invalidation.must_be_valid_reason option
   | MustNotBeTainted of TaintSink.t TaintSinkMap.t
   | JavaResourceReleased
   | CSharpResourceReleased
   | HackAsyncAwaited
-  | PropagateTaintFrom of taint_in list
-  | RefCounted
+  | PropagateTaintFrom of taint_propagation_reason * taint_in list
   | ReturnedFromUnknown of AbstractValue.t list
   | SourceOriginOfCopy of {source: PulseAbstractValue.t; is_const_ref: bool}
       (** records the source value for a given copy to lookup the appropriate heap in non-disj
@@ -153,8 +180,6 @@ module Attributes : sig
 
   val get_config_usage : t -> ConfigUsage.t option
 
-  val get_const_string : t -> string option
-
   val get_used_as_branch_cond : t -> (Procname.t * Location.t * Trace.t) option
 
   val get_copied_into : t -> CopiedInto.t option
@@ -169,15 +194,23 @@ module Attributes : sig
 
   val remove_allocation : t -> t
 
-  val is_ref_counted : t -> bool
-
   val get_unknown_effect : t -> (CallEvent.t * ValueHistory.t) option
 
-  val get_dynamic_type_source_file : t -> (Typ.t * SourceFile.t option) option
+  val remove_dict_contain_const_keys : t -> t
+
+  val is_dict_contain_const_keys : t -> bool
+
+  val get_dict_read_const_keys : t -> ConstKeys.t option
 
   val get_static_type : t -> Typ.Name.t option
 
   val is_java_resource_released : t -> bool
+
+  val get_hack_builder : t -> Builder.t option [@@warning "-unused-value-declaration"]
+
+  val remove_hack_builder : t -> t [@@warning "-unused-value-declaration"]
+
+  val is_hack_builder_discardable : t -> bool [@@warning "-unused-value-declaration"]
 
   val is_csharp_resource_released : t -> bool
 
@@ -189,7 +222,9 @@ module Attributes : sig
 
   val remove_tainted : t -> t
 
-  val get_propagate_taint_from : t -> taint_in list option
+  val remove_must_not_be_tainted : ?kinds:TaintConfig.Kind.Set.t -> t -> t
+
+  val get_propagate_taint_from : t -> (taint_propagation_reason * taint_in list) option
 
   val remove_propagate_taint_from : t -> t
 
@@ -210,11 +245,15 @@ module Attributes : sig
 
   val is_always_reachable : t -> bool
 
+  val is_in_reported_retain_cycle : t -> bool
+
   val is_modified : t -> bool
 
   val is_std_moved : t -> bool
 
   val is_std_vector_reserved : t -> bool
+
+  val get_last_lookup : t -> AbstractValue.t option
 
   val get_uninitialized : t -> UninitializedTyp.t option
 

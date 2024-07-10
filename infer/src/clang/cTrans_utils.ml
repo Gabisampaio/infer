@@ -423,7 +423,12 @@ let create_alloc_instrs integer_type_widths ~alloc_builtin ?size_exp ?placement_
           None
     in
     let sizeof_exp_ =
-      Exp.Sizeof {typ= function_type_np; nbytes; dynamic_length= None; subtype= Subtype.exact}
+      Exp.Sizeof
+        { typ= function_type_np
+        ; nbytes
+        ; dynamic_length= None
+        ; subtype= Subtype.exact
+        ; nullable= false }
     in
     let sizeof_exp =
       match size_exp with
@@ -477,9 +482,7 @@ let objc_new_trans trans_state ~alloc_builtin loc stmt_info cls_name function_ty
   |> mk_trans_result (Exp.Var init_ret_id, alloc_ret_type)
 
 
-let new_or_alloc_trans trans_state loc stmt_info qual_type class_name_opt selector =
-  let tenv = trans_state.context.CContext.tenv in
-  let function_type = CType_decl.qual_type_to_sil_type tenv qual_type in
+let new_or_alloc_trans trans_state loc stmt_info function_type class_name_opt selector =
   let class_name =
     match class_name_opt with
     | Some class_name ->

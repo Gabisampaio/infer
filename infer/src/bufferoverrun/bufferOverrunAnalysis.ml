@@ -347,10 +347,11 @@ module TransferFunctions = struct
             (* This may happen for procedures with a biabduction model too. *)
             L.d_printfln_escaped "/!\\ Unknown call to %a" Procname.pp_without_templates
               callee_pname ;
-            ScubaLogging.cost_log_message ~label:"unmodeled_function_inferbo"
-              ~message:
-                (F.asprintf "[Inferbo] Unmodeled Function: %a" Procname.pp_without_templates
-                   callee_pname ) ;
+            if Config.cost_log_unknown_calls then
+              ScubaLogging.log_message ~label:"unmodeled_function_inferbo"
+                ~message:
+                  (F.asprintf "[Inferbo] Unmodeled Function: %a" Procname.pp_without_templates
+                     callee_pname ) ;
             Dom.Mem.add_unknown_from ret ~callee_pname ~location mem )
 
 
@@ -377,7 +378,7 @@ module TransferFunctions = struct
       | Load {id; e= Exp.Lvar pvar; typ; loc= location}
         when Pvar.is_compile_constant pvar || Pvar.is_ice pvar ->
           load_global_constant get_summary (id, typ) pvar location mem
-            ~find_from_initializer:(fun callee_mem -> Dom.Mem.find (Loc.of_pvar pvar) callee_mem)
+            ~find_from_initializer:(fun callee_mem -> Dom.Mem.find (Loc.of_pvar pvar) callee_mem )
       | Load {id; e= Exp.Lindex (Exp.Lvar pvar, _); typ; loc= location}
         when Pvar.is_compile_constant pvar || Pvar.is_ice pvar
              || (Pvar.is_constant_array pvar && Pvar.is_const pvar) ->
@@ -523,7 +524,7 @@ let compute_invariant_map :
   let analysis_data =
     let proc_name = Procdesc.get_proc_name proc_desc in
     let open IOption.Let_syntax in
-    let get_summary = analyze_dependency in
+    let get_summary proc_name = analyze_dependency proc_name |> AnalysisResult.to_option in
     let get_formals callee_pname =
       Attributes.load callee_pname >>| ProcAttributes.get_pvar_formals
     in

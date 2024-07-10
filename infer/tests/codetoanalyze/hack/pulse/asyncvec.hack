@@ -32,3 +32,15 @@ async function vecupdateFN(): Awaitable<void> {
   await $v[1];
   await $v[0];
 }
+
+async function nodynamictypeOK_FP(vec<Awaitable<int>> $c): Awaitable<void> {
+  $c[0] = genInt3();
+  await $c[0];
+}
+
+async function vecAccessFP(): Awaitable<void> {
+  $v = vec[genInt3(), genInt3()];
+  await $v[0];
+  $_dummy = $v[0];
+  await $v[1];
+}

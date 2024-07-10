@@ -12,7 +12,7 @@ open ConcurrencyModels
 module AnnotationAliases = struct
   let of_json = function
     | `List aliases ->
-        List.map ~f:Yojson.Basic.Util.to_string aliases
+        List.map ~f:Yojson.Safe.Util.to_string aliases
     | _ ->
         L.(die UserError)
           "Couldn't parse thread-safety annotation aliases; expected list of strings"
@@ -237,7 +237,7 @@ let is_container_read tenv pn =
      treatment between std::map::operator[] and all other operator[]. *)
   | ObjC_Cpp _ | C _ ->
       (not (is_cpp_container_write pn)) && is_cpp_container_read pn
-  | Erlang _ | Hack _ | Linters_dummy_method | Block _ | Python _ | WithFunctionParameters _ ->
+  | Erlang _ | Hack _ | Block _ | Python _ ->
       false
 
 
@@ -601,7 +601,7 @@ let is_initializer tenv proc_name =
 
 
 let get_current_class_and_superclasses_satisfying_attr_check check tenv pname =
-  match Procname.base_of pname with
+  match pname with
   | Procname.Java java_pname ->
       let current_class = Procname.Java.get_class_type_name java_pname in
       let satisfying_classes =

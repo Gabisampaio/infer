@@ -367,8 +367,8 @@ let rec get_struct_fields tenv ?cxx_record_decl_info decl =
     | FieldDecl (_, {ni_name}, qt, _) ->
         let typ = qual_type_to_sil_type tenv qt in
         let annotation_items = CAst_utils.sil_annot_of_type qt in
-        let name = CGeneral_utils.mk_class_field_name ?cxx_record_decl_info class_tname ni_name in
-        [(name, typ, annotation_items)]
+        let name = Fieldname.make class_tname ni_name in
+        [Struct.mk_field name typ ~annot:annotation_items]
     | _ ->
         []
   in
@@ -507,7 +507,7 @@ and get_template_info tenv (fdi : Clang_ast_t.function_decl_info) =
       Typ.NoTemplate
 
 
-and mk_c_function ?tenv name function_decl_info_opt parameters =
+and mk_c_function ?tenv name function_decl_info_opt =
   let file =
     match function_decl_info_opt with
     (* when we model static functions, we cannot take the file into account to
@@ -543,7 +543,7 @@ and mk_c_function ?tenv name function_decl_info_opt parameters =
   in
   let mangled = file ^ mangled_name in
   if String.is_empty mangled then Procname.from_string_c_fun (QualifiedCppName.to_qual_string name)
-  else Procname.C (Procname.C.c name ~mangled parameters template_info)
+  else Procname.C (Procname.C.c name ~mangled template_info)
 
 
 and mk_cpp_method ?tenv class_name method_name ?meth_decl mangled parameters =
@@ -589,16 +589,6 @@ and objc_method_procname ?tenv decl_info method_name parameters mdi =
   mk_objc_method class_typename method_name method_kind parameters
 
 
-and objc_block_procname outer_proc_opt parameters =
-  let block_type =
-    Option.value_map ~f:Procname.get_block_type outer_proc_opt
-      ~default:(Procname.Block.SurroundingProc {class_name= None; name= ""})
-  in
-  let block_index = CFrontend_config.get_fresh_block_index () in
-  let block = Procname.Block.make_in_outer_scope block_type block_index parameters in
-  Procname.Block block
-
-
 and procname_from_decl ?tenv ?block_return_type ?outer_proc meth_decl =
   let open Clang_ast_t in
   let parameters =
@@ -627,7 +617,7 @@ and procname_from_decl ?tenv ?block_return_type ?outer_proc meth_decl =
   match meth_decl with
   | FunctionDecl (decl_info, name_info, _, fdi) ->
       let name = CAst_utils.get_qualified_name name_info in
-      mk_c_function ?tenv name (Some (decl_info, fdi)) parameters
+      mk_c_function ?tenv name (Some (decl_info, fdi))
   | CXXConstructorDecl (decl_info, {ni_name= ""; ni_qual_name= "" :: qual_names}, _, fdi, mdi) ->
       (* For some constructors of non-class objects in C++, the clang frontend gives empty method
          name, e.g. struct, lambda, and union.  For better readability, we replace them to a
@@ -644,8 +634,12 @@ and procname_from_decl ?tenv ?block_return_type ?outer_proc meth_decl =
       mk_cpp_method decl_info name_info fdi mdi
   | ObjCMethodDecl (decl_info, name_info, mdi) ->
       objc_method_procname ?tenv decl_info name_info.Clang_ast_t.ni_name parameters mdi
-  | BlockDecl _ ->
-      objc_block_procname outer_proc parameters
+  | BlockDecl (decl_info, block_decl_info) ->
+      let outer_proc_class_name =
+        Option.value_map ~default:None ~f:Procname.get_class_type_name outer_proc
+      in
+      let name, mangled = CAst_utils.create_objc_block_name decl_info block_decl_info in
+      Procname.Block {Typ.class_name= outer_proc_class_name; name; mangled}
   | _ ->
       Logging.die InternalError "Expected method decl, but got %s."
         (Clang_ast_proj.get_decl_kind_string meth_decl)
@@ -697,11 +691,19 @@ and add_record tenv decl_info definition_decl record_decl_info ?cxx_record_decl_
           if Typ.Name.Cpp.is_class sil_typename then Annot.Class.cpp
           else (* No annotations for structs *) Annot.Item.empty
         in
+        let class_info =
+          let is_trivially_copyable =
+            Option.exists cxx_record_decl_info ~f:(fun {Clang_ast_t.xrdi_is_trivially_copyable} ->
+                xrdi_is_trivially_copyable )
+          in
+          Struct.ClassInfo.CppClassInfo {is_trivially_copyable}
+        in
         let source_file =
           (fst decl_info.Clang_ast_t.di_source_range).sl_file
           |> Option.map ~f:SourceFile.from_abs_path
         in
-        Tenv.mk_struct tenv ~fields ~statics ~methods ~supers ~annots ?source_file sil_typename
+        Tenv.mk_struct tenv ~fields ~statics ~methods ~supers ~annots ~class_info ?source_file
+          sil_typename
         |> ignore ;
         CAst_utils.update_sil_types_map type_ptr sil_desc ;
         sil_desc )
@@ -716,10 +718,11 @@ and add_record tenv decl_info definition_decl record_decl_info ?cxx_record_decl_
 and get_record_struct_type tenv definition_decl : Typ.desc =
   let open Clang_ast_t in
   match definition_decl with
-  | ClassTemplateSpecializationDecl (decl_info, _, type_ptr, _, _, _, record_decl_info, _, _, _, _)
   | RecordDecl (decl_info, _, type_ptr, _, _, _, record_decl_info) ->
       add_record tenv decl_info definition_decl record_decl_info type_ptr
-  | CXXRecordDecl (decl_info, _, type_ptr, _, _, _, record_decl_info, cxx_record_decl_info) ->
+  | CXXRecordDecl (decl_info, _, type_ptr, _, _, _, record_decl_info, cxx_record_decl_info)
+  | ClassTemplateSpecializationDecl
+      (decl_info, _, type_ptr, _, _, _, record_decl_info, cxx_record_decl_info, _, _, _) ->
       add_record tenv decl_info definition_decl record_decl_info ~cxx_record_decl_info type_ptr
   | _ ->
       assert false
@@ -741,7 +744,7 @@ module CProcname = struct
   module NoAstDecl = struct
     let c_function_of_string tenv name =
       let qual_name = QualifiedCppName.of_qual_string name in
-      mk_c_function ~tenv qual_name None []
+      mk_c_function ~tenv qual_name None
 
 
     let cpp_method_of_string tenv class_name method_name =

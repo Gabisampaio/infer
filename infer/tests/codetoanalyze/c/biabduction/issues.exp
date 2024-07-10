@@ -17,6 +17,7 @@ codetoanalyze/c/biabduction/custom_error/custom.c, pouf, 3, UNEXPECTED_NEGATIVE_
 codetoanalyze/c/biabduction/dangling_deref/dpd.c, nodpd1, 3, NULL_DEREFERENCE, B1
 codetoanalyze/c/biabduction/dangling_deref/dpd.c, dpd, 3, DANGLING_POINTER_DEREFERENCE, no_bucket
 codetoanalyze/c/biabduction/dangling_deref/dpd.c, intraprocdpd, 3, DANGLING_POINTER_DEREFERENCE, no_bucket
+codetoanalyze/c/biabduction/initialization/compound_literal.c, divide_by_zero, 0, DIVIDE_BY_ZERO, no_bucket
 codetoanalyze/c/biabduction/initialization/initlistexpr.c, init_divide_by_zero, 2, Assert_failure, no_bucket
 codetoanalyze/c/biabduction/initialization/initlistexpr.c, init_divide_by_zero, 2, DIVIDE_BY_ZERO, no_bucket
 codetoanalyze/c/biabduction/lists/list_api.c, FP_list_build_and_free_good, 11, BIABDUCTION_MEMORY_LEAK, no_bucket
@@ -92,7 +93,6 @@ codetoanalyze/c/biabduction/null_dereference/memcpy-test.c, testError2, 5, NULL_
 codetoanalyze/c/biabduction/null_dereference/memcpy-test.c, testError3, 4, NULL_DEREFERENCE, B1
 codetoanalyze/c/biabduction/null_dereference/null_pointer_dereference.c, simple_null_pointer, 2, NULL_DEREFERENCE, B1
 codetoanalyze/c/biabduction/null_dereference/null_pointer_dereference.c, null_pointer_interproc, 2, NULL_DEREFERENCE, B1
-codetoanalyze/c/biabduction/null_dereference/null_pointer_dereference.c, null_pointer_with_function_pointer, 4, NULL_DEREFERENCE, B1
 codetoanalyze/c/biabduction/null_dereference/null_pointer_dereference.c, basic_null_dereference, 2, NULL_DEREFERENCE, B1
 codetoanalyze/c/biabduction/null_dereference/null_pointer_dereference.c, no_check_for_null_after_malloc, 3, NULL_DEREFERENCE, B1
 codetoanalyze/c/biabduction/null_dereference/null_pointer_dereference.c, no_check_for_null_after_realloc, 9, NULL_DEREFERENCE, B1

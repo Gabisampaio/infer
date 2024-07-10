@@ -250,11 +250,13 @@ let bufferoverrun_debug_level = debug_level_of_int Config.bo_debug
 
 let capture_debug_level = debug_level_of_int Config.debug_level_capture
 
+let report_debug_level = debug_level_of_int Config.debug_level_report
+
 let mergecapture_debug_level = Quiet
 
 let test_determinator_debug_level = debug_level_of_int Config.debug_level_test_determinator
 
-type debug_kind = Analysis | BufferOverrun | Capture | MergeCapture | TestDeterminator
+type debug_kind = Analysis | BufferOverrun | Capture | MergeCapture | Report | TestDeterminator
 
 let debug kind level fmt =
   let base_level =
@@ -267,6 +269,8 @@ let debug kind level fmt =
         capture_debug_level
     | MergeCapture ->
         mergecapture_debug_level
+    | Report ->
+        report_debug_level
     | TestDeterminator ->
         test_determinator_debug_level
   in
@@ -364,6 +368,7 @@ let setup_log_file () =
       log_file := Some (fmt, chan) ;
       if preexisting_logfile then is_newline := false ;
       reset_formatters () ;
+      EarlyScubaLogging.finish () |> ScubaLogging.log_many ;
       if Config.is_originator && preexisting_logfile then
         phase
           "============================================================@\n\
@@ -490,9 +495,8 @@ let d_increase_indent () = d_printf "  @["
 
 let d_decrease_indent () = d_printf "@]"
 
-let d_with_indent ?name_color ?(collapsible = false) ?(escape_result = true) ?pp_result ~f name_fmt
-    =
-  if not Config.write_html then F.ikfprintf (fun _ -> f ()) Format.err_formatter name_fmt
+let with_indent ?name_color ?(collapsible = false) ?(escape_result = true) ?pp_result ~f name_fmt =
+  if not Config.write_html then F.ikfprintf (fun _ -> f ()) Format.std_formatter name_fmt
   else
     let print_block name =
       let block_tag, name_tag = if collapsible then ("details", "summary") else ("div", "div") in

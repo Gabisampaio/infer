@@ -17,9 +17,6 @@ val vpath_find : Tenv.t -> 'a Prop.t -> Exp.t -> DecompiledExp.vpath * Typ.t opt
 val hpred_is_open_resource : Tenv.t -> 'a Prop.t -> Predicates.hpred -> PredSymb.resource option
 (** Check whether the hpred is a |-> representing a resource in the Racquire state *)
 
-val exp_rv_dexp : Tenv.t -> Procdesc.Node.t -> Exp.t -> DecompiledExp.t option
-(** describe rvalue [e] as a dexp *)
-
 val explain_array_access :
   Procname.t -> Tenv.t -> Localise.deref_str -> 'a Prop.t -> Location.t -> Localise.error_desc
 (** Produce a description of the array access performed in the current instruction, if any. *)
@@ -64,10 +61,6 @@ val explain_dereference_as_caller_expression :
 
 val explain_divide_by_zero : Tenv.t -> Exp.t -> Procdesc.Node.t -> Location.t -> Localise.error_desc
 (** explain a division by zero *)
-
-val explain_condition_always_true_false :
-  Tenv.t -> IntLit.t -> Exp.t -> Procdesc.Node.t -> Location.t -> Localise.error_desc
-(** explain a condition which is always true or false *)
 
 val explain_leak :
      Tenv.t

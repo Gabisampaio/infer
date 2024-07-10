@@ -12,7 +12,7 @@ open! IStd
 module L = Logging
 module F = Format
 
-type translation_unit = SourceFile.t option [@@deriving sexp]
+type translation_unit = SourceFile.t option [@@deriving compare, equal, sexp, hash, normalize]
 
 (** Kind of global variables *)
 type pvar_kind =
@@ -22,7 +22,7 @@ type pvar_kind =
   | Abduced_ref_param of Procname.t * int * Location.t
       (** synthetic variable to represent param passed by reference *)
   | Global_var of
-      { translation_unit: translation_unit [@ignore]
+      { translation_unit: translation_unit
       ; template_args: Typ.template_spec_info
       ; is_constexpr: bool  (** is it compile constant? *)
       ; is_ice: bool  (** is it integral constant expression? *)
@@ -32,11 +32,11 @@ type pvar_kind =
       ; is_constant_array: bool
       ; is_const: bool }  (** global variable *)
   | Seed_var  (** variable used to store the initial value of formal parameters *)
-[@@deriving compare, equal, sexp, hash]
+[@@deriving compare, equal, sexp, hash, normalize]
 
 (** Names for program variables. *)
-type t = {pv_hash: int; pv_name: Mangled.t; pv_kind: pvar_kind; pv_tmp_id: Ident.t option}
-[@@deriving compare, equal, sexp, hash]
+type t = {pv_hash: int; pv_name: Mangled.t; pv_kind: pvar_kind; pv_tmp_id: Ident.t option [@ignore]}
+[@@deriving compare, equal, sexp, hash, normalize]
 
 let yojson_of_t {pv_name} = [%yojson_of: Mangled.t] pv_name
 
@@ -71,7 +71,12 @@ let get_simplified_name pv =
   let s =
     match String.rsplit2 s ~on:'.' with
     | Some (s1, s2) -> (
-      match String.rsplit2 s1 ~on:'.' with Some (_, s4) -> Printf.sprintf "%s.%s" s4 s2 | _ -> s )
+      match pv with
+      | {pv_kind= Global_var _} when Language.curr_language_is Language.Clang ->
+          s2
+      | _ -> (
+        match String.rsplit2 s1 ~on:'.' with Some (_, s4) -> Printf.sprintf "%s.%s" s4 s2 | _ -> s )
+      )
     | _ ->
         s
   in
@@ -117,6 +122,8 @@ let is_this pvar = Mangled.is_this (get_name pvar)
 
 (** Check if a pvar is the special "self" var *)
 let is_self pvar = Mangled.is_self (get_name pvar)
+
+let is_artificial pvar = Mangled.is_artificial (get_name pvar)
 
 (** Check if the pvar is a return var *)
 let is_return pv = Mangled.equal (get_name pv) Ident.name_return
@@ -198,11 +205,12 @@ let pp_ ~verbose f pv =
       if verbose then F.fprintf f "|abducedRefParam%d" index
   | Global_var {translation_unit; template_args; is_constexpr; is_ice; is_pod} ->
       if verbose then
-        F.fprintf f "#GB<%a%s%s%s>$" pp_translation_unit translation_unit
+        F.fprintf f "#GB<%a%s%s%s>$%a" pp_translation_unit translation_unit
           (if is_constexpr then "|const" else "")
           (if is_ice then "|ice" else "")
-          (if not is_pod then "|!pod" else "") ;
-      Mangled.pp f name ;
+          (if not is_pod then "|!pod" else "")
+          Mangled.pp name
+      else F.fprintf f "%s" (get_simplified_name pv) ;
       (Typ.pp_template_spec_info Pp.text) f template_args
   | Seed_var ->
       F.fprintf f "old_%a" Mangled.pp name
@@ -337,7 +345,7 @@ let get_initializer_pname {pv_name; pv_kind} =
           SourceFile.to_string file |> Utils.string_crc_hex32 |> Option.return
         else Some None
       in
-      Procname.C (Procname.C.c qual_name ?mangled [] template_args)
+      Procname.C (Procname.C.c qual_name ?mangled template_args)
   | _ ->
       None
 
@@ -346,33 +354,13 @@ let get_template_args pvar =
   match pvar.pv_kind with Global_var {template_args} -> template_args | _ -> Typ.NoTemplate
 
 
-let swap_proc_in_local_pvar pvar proc_name =
-  match pvar.pv_kind with Local_var _ -> {pvar with pv_kind= Local_var proc_name} | _ -> pvar
-
-
-let rec specialize_pvar pvar proc_name =
-  match proc_name with
-  | Procname.WithFunctionParameters (orig_pname, _, _) ->
-      let pvar = specialize_pvar pvar orig_pname in
-      if equal (mk (get_name pvar) orig_pname) pvar then swap_proc_in_local_pvar pvar proc_name
-      else pvar
-  | _ ->
-      pvar
-
-
 let is_objc_static_local_of_proc_name pname pvar =
   (* local static name is of the form procname_varname *)
-  let var_name = Mangled.to_string (get_name pvar) in
-  match Str.split_delim (Str.regexp_string pname) var_name with [_; _] -> true | _ -> false
+  String.is_prefix (Mangled.to_string (get_name pvar)) ~prefix:pname
 
 
-let is_block_pvar =
-  let regexp = Str.regexp_string Config.anonymous_block_prefix in
-  fun pvar ->
-    let has_block_prefix s =
-      match Str.split_delim regexp s with _ :: _ :: _ -> true | _ -> false
-    in
-    has_block_prefix (Mangled.to_string (get_name pvar))
+let is_block_pvar pvar =
+  String.is_prefix (Mangled.to_string (get_name pvar)) ~prefix:Config.anonymous_block_prefix
 
 
 module Set = PrettyPrintable.MakePPSet (struct
@@ -386,6 +374,3 @@ module Map = PrettyPrintable.MakePPMap (struct
 
   let pp = pp Pp.text
 end)
-
-let is_local_to_procedure proc_name pvar =
-  get_declaring_function pvar |> Option.exists ~f:(Procname.equal proc_name)

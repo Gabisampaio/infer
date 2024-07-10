@@ -7,13 +7,15 @@ Here is an overview of the checkers currently available in Infer.
 
 ## Annotation Reachability
 
-Given a pair of source and sink annotation, e.g. `@PerformanceCritical` and `@Expensive`, this checker will warn whenever some method annotated with `@PerformanceCritical` calls, directly or indirectly, another method annotated with `@Expensive`
+Given pairs of source and sink annotations, e.g. `@A` and `@B`, this checker will warn whenever some method annotated with `@A` calls, directly or indirectly, another method annotated with `@B`. Besides the custom pairs, it is also possible to enable some built-in checks, such as `@PerformanceCritical` reaching `@Expensive` or `@NoAllocation` reaching `new`. See flags starting with `--annotation-reachability`.
 
 [Visit here for more information.](/docs/next/checker-annotation-reachability)
 
 ## Biabduction
 
 This analysis deals with a range of issues, many linked to memory safety.
+
+**\*\*\*DEPRECATED\*\*\*** This has been replaced by Pulse and will be removed in the next release.
 
 [Visit here for more information.](/docs/next/checker-biabduction)
 
@@ -41,14 +43,6 @@ Experimental datalog-based points-to analysis.
 
 [Visit here for more information.](/docs/next/checker-datalog)
 
-## Eradicate
-
-The eradicate `@Nullable` checker for Java annotations.
-
-**\*\*\*DEPRECATED\*\*\*** Unmaintained and will be removed in the future. Consider using [NullAway](https://github.com/uber/NullAway) as an alternative to Eradicate.
-
-[Visit here for more information.](/docs/next/checker-eradicate)
-
 ## Fragment Retains View
 
 Detects when Android fragments are not explicitly nullified before becoming unreachable.
@@ -56,14 +50,6 @@ Detects when Android fragments are not explicitly nullified before becoming unre
 **\*\*\*DEPRECATED\*\*\*** Unmaintained due to poor precision.
 
 [Visit here for more information.](/docs/next/checker-fragment-retains-view)
-
-## Immutable Cast
-
-Detection of object cast from immutable types to mutable types. For instance, it will detect casts from `ImmutableList` to `List`, `ImmutableMap` to `Map`, and `ImmutableSet` to `Set`.
-
-**\*\*\*DEPRECATED\*\*\*** Unmaintained due to poor actionability of the reports.
-
-[Visit here for more information.](/docs/next/checker-immutable-cast)
 
 ## Impurity
 
@@ -76,6 +62,12 @@ Detects functions with potential side-effects. Same as "purity", but implemented
 Check for inefficient uses of iterators that iterate on keys then lookup their values, instead of iterating on key-value pairs directly.
 
 [Visit here for more information.](/docs/next/checker-inefficient-keyset-iterator)
+
+## Lineage
+
+Computes a dataflow graph
+
+[Visit here for more information.](/docs/next/checker-lineage)
 
 ## Litho "Required Props"
 
@@ -111,7 +103,7 @@ Detect mismatches between the Java `printf` format strings and the argument type
 
 ## Pulse
 
-Memory and lifetime analysis.
+General-purpose memory and value analysis engine.
 
 [Visit here for more information.](/docs/next/checker-pulse)
 
@@ -120,12 +112,6 @@ Memory and lifetime analysis.
 Detects pure (side-effect-free) functions. A different implementation of "impurity".
 
 [Visit here for more information.](/docs/next/checker-purity)
-
-## Quandary
-
-The Quandary taint analysis detects flows of values between sources and sinks, except if the value went through a "sanitizer". In addition to some defaults, users can specify their own sources, sinks, and sanitizers functions.
-
-[Visit here for more information.](/docs/next/checker-quandary)
 
 ## RacerD
 
@@ -139,11 +125,11 @@ Toy checker for the "resource leak" write-your-own-checker exercise.
 
 [Visit here for more information.](/docs/next/checker-resource-leak-lab)
 
-## Scope Leakage
+## SIL validation
 
-The Java/Kotlin checker takes into account a set of "scope" annotations and a must-not-hold relation over the scopes. The checker raises an alarm if there exists a field access path from object A to object B, with respective scopes SA and SB, such that must-not-hold(SA, SB).
+This checker validates that all SIL instructions in all procedure bodies conform to a (front-end specific) subset of SIL.
 
-[Visit here for more information.](/docs/next/checker-scope-leakage)
+[Visit here for more information.](/docs/next/checker-sil-validation)
 
 ## Static Initialization Order Fiasco
 
@@ -151,17 +137,11 @@ Catches Static Initialization Order Fiascos in C++, that can lead to subtle, com
 
 [Visit here for more information.](/docs/next/checker-siof)
 
-## SIL validation
+## Scope Leakage
 
-This checker validates that all SIL instructions in all procedure bodies conform to a (front-end specific) subset of SIL.
+The Java/Kotlin checker takes into account a set of "scope" annotations and a must-not-hold relation over the scopes. The checker raises an alarm if there exists a field access path from object A to object B, with respective scopes SA and SB, such that must-not-hold(SA, SB).
 
-[Visit here for more information.](/docs/next/checker-sil-validation)
-
-## Lineage
-
-Computes a dataflow graph
-
-[Visit here for more information.](/docs/next/checker-lineage)
+[Visit here for more information.](/docs/next/checker-scope-leakage)
 
 ## Self in Block
 
@@ -180,12 +160,3 @@ Detect various kinds of situations when no progress is being made because of con
 Detect errors based on user-provided state machines describing temporal properties over multiple objects.
 
 [Visit here for more information.](/docs/next/checker-topl)
-
-## Uninitialized Value
-
-Warns when values are used before having been initialized.
-
-**\*\*\*DEPRECATED\*\*\*** Uninitialized value checking has moved to Pulse.
-
-[Visit here for more information.](/docs/next/checker-uninit)
-

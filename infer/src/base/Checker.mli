@@ -6,6 +6,7 @@
  *)
 
 open! IStd
+module F = Format
 
 type t =
   | AnnotationReachability
@@ -14,13 +15,12 @@ type t =
   | BufferOverrunChecker
   | ConfigImpactAnalysis
   | Cost
-  | Datalog
   | DisjunctiveDemo
-  | Eradicate
   | FragmentRetainsView
-  | ImmutableCast
   | Impurity
   | InefficientKeysetIterator
+  | Lineage
+  | LineageShape
   | LithoRequiredProps
   | Liveness
   | LoopHoisting
@@ -29,18 +29,14 @@ type t =
   | Pulse
   | PurityAnalysis
   | PurityChecker
-  | Quandary
   | RacerD
   | ResourceLeakLabExercise
-  | ScopeLeakage
-  | SIOF
   | SILValidation
-  | Lineage
-  | LineageShape
+  | SIOF
+  | ScopeLeakage
   | SelfInBlock
   | Starvation
   | Topl
-  | Uninit
 [@@deriving equal, enumerate]
 
 (** per-language support for each checker *)
@@ -87,3 +83,10 @@ val get_id : t -> string
 (** [get_id c] is [(config c).id] *)
 
 val from_id : string -> t option
+
+val pp_manual : F.formatter -> t -> unit
+(** prints a short explanation of the checker; used for the man pages *)
+
+module Set : PrettyPrintable.PPSet with type elt = t
+
+val get_dependencies : t -> Set.t

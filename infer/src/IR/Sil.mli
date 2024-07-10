@@ -53,8 +53,8 @@ type instr_metadata =
 [@@deriving compare]
 
 (** An instruction. Syntactic invariants of instructions per-frontend are documented in
-    {!SilValidation}, where Clang is the most general validator (that is, it properly subsumes all
-    other validators). These invariants are enforced when --sil-validation is passed. *)
+    {!Checkers.SilValidation}, where Clang is the most general validator (that is, it properly
+    subsumes all other validators). These invariants are enforced when --sil-validation is passed. *)
 type instr =
   | Load of {id: Ident.t; e: Exp.t; typ: Typ.t; loc: Location.t}
       (** Load a value from the heap into an identifier.
@@ -84,9 +84,7 @@ type instr =
   | Metadata of instr_metadata
       (** hints about the program that are not strictly needed to understand its semantics, for
           instance information about its original syntactic structure *)
-[@@deriving compare]
-
-val equal_instr : instr -> instr -> bool
+[@@deriving compare, equal, normalize]
 
 val equal_structural_instr : instr -> instr -> Exp.t Exp.Map.t -> bool * Exp.t Exp.Map.t
 (** Compare instructions from different procedures without considering [loc]s, [ident]s, [pvar]s, or

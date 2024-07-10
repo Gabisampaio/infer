@@ -38,12 +38,11 @@ let compute_icfg trans_unit_ctx tenv ast =
 
 let init_global_state_capture () =
   Ident.NameGenerator.reset () ;
-  CFrontend_config.global_translation_unit_decls := [] ;
-  CFrontend_config.reset_block_counter ()
+  CFrontend_config.global_translation_unit_decls := []
 
 
 let do_objc_preanalyses cfg tenv =
-  CAddImplicitDeallocImpl.process cfg tenv ;
+  if Config.objc_synthesize_dealloc then CAddImplicitDeallocImpl.process cfg tenv ;
   CAddImplicitGettersSetters.process cfg tenv ;
   CReplaceDynamicDispatch.process cfg ;
   CViewControllerLifecycle.process cfg tenv

@@ -25,6 +25,9 @@ type var_data =
             block *)
   ; is_constexpr: bool
   ; is_declared_unused: bool  (** variable declared with attribute [unused] *)
+  ; is_structured_binding: bool  (** variable declared by structured binding *)
+  ; has_cleanup_attribute: bool
+        (** variable declared with attribute [cleanup], only set in clang frontend *)
   ; tmp_id: Ident.t option
         (** the tmp id used to build the variable name in case of a temp variable, None otherwise. *)
   }
@@ -33,8 +36,8 @@ type specialized_with_aliasing_info =
   { orig_proc: Procname.t
   ; aliases: Pvar.t list list
         (** all the pvars in a same list are aliasing each other. e.g.
-            [aliases = \[\[x; y; z\]; \[a; b\]\]] indicates that [x], [y] and [z] alias each other
-            and [a] and [b] as well *) }
+            [aliases = [[x; y; z]; [a; b]]] indicates that [x], [y] and [z] alias each other and [a]
+            and [b] as well *) }
 [@@deriving compare]
 
 type 'captured_var passed_closure =
@@ -74,6 +77,7 @@ type t =
   ; is_java_synchronized_method: bool  (** the procedure is a Java synchronized method *)
   ; is_csharp_synchronized_method: bool  (** the procedure is a C# synchronized method *)
   ; is_hack_async: bool
+  ; is_hack_wrapper: bool  (** a generated wrapper for LSB or default parameters *)
   ; block_as_arg_attributes: block_as_arg_attributes option
         (** Present if the procedure is an Objective-C block that has been passed to the given
             method in a position annotated with the NS_NOESCAPE attribute. *)
@@ -117,9 +121,6 @@ val pp : Format.formatter -> t -> unit
 
 val get_access : t -> access
 (** Return the visibility attribute *)
-
-val get_formals : t -> (Mangled.t * Typ.t * Annot.Item.t) list
-(** Return name, type, and annotation of formal parameters *)
 
 val get_loc : t -> Location.t
 (** Return loc information for the procedure *)

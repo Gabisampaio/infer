@@ -5,6 +5,7 @@
 
 namespace Uninit;
 
+<<__ConsistentConstruct>>
 abstract class A {
   abstract const string FIELD;
 
@@ -27,11 +28,6 @@ abstract class A {
   public static function call_new_static_ok(): void {
     call_nop(); // for __lazy_class_initialize(A)
     $_ = new static();
-  }
-
-  public static function call_new_self_bad(): void {
-    call_nop(); // for __lazy_class_initialize(A)
-    $_ = new self();
   }
 }
 
@@ -168,4 +164,43 @@ abstract class CInitFieldInterface {
 
 function init_field_in_interface_ok(): string {
   return CInitFieldInterface::get_field();
+}
+
+enum E: int {
+  S1 = 1;
+  S2 = 2;
+}
+
+abstract final class InitEnumFields {
+  // The long field name somehow triggers a deduplication of the field name evaluations in hackc,
+  // which was needed to reproduce a false positive.
+  const E F1_VERY_VERY_VERY_VERY_VERY_VERY_LONG_NAME = E::S1;
+  const E F2 = E::S2;
+
+  public static function access_f1(): void {
+    $_ = static::F1_VERY_VERY_VERY_VERY_VERY_VERY_LONG_NAME;
+  }
+}
+
+function call_init_enum_fields_access_f1_ok(): void {
+  InitEnumFields::access_f1();
+}
+
+trait SetConstInTraitTrait {
+  const string FIELD = "defined";
+}
+
+class SetConstInTraitClass extends A {
+  use SetConstInTraitTrait;
+}
+
+function call_get_field_set_in_trait_ok(): string {
+  return SetConstInTraitClass::get_field();
+}
+
+class SetConstInTraitDeepClass extends SetConstInTraitClass {
+}
+
+function call_get_field_set_in_trait_deep_ok(): string {
+  return SetConstInTraitDeepClass::get_field();
 }

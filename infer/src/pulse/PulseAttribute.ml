@@ -30,6 +30,7 @@ module Attribute = struct
     | CSharpResource of CSharpClassName.t
     | ObjCAlloc
     | HackAsync
+    | HackBuilderResource of HackClassName.t
   [@@deriving compare, equal]
 
   let pp_allocator fmt = function
@@ -53,6 +54,8 @@ module Attribute = struct
         F.fprintf fmt "alloc"
     | HackAsync ->
         F.fprintf fmt "hack async"
+    | HackBuilderResource class_name ->
+        F.fprintf fmt "hack builder %a" HackClassName.pp class_name
 
 
   type taint_in = {v: AbstractValue.t; history: (ValueHistory.t[@compare.ignore] [@equal.ignore])}
@@ -105,6 +108,9 @@ module Attribute = struct
 
   module TaintSanitizedSet = PrettyPrintable.MakePPSet (TaintSanitized)
 
+  type taint_propagation_reason = InternalModel | UnknownCall | UserConfig
+  [@@deriving compare, equal, show {with_path= false}]
+
   module CopyOrigin = struct
     type t = CopyCtor | CopyAssignment | CopyToOptional | CopyInGetDefault
     [@@deriving compare, equal]
@@ -154,14 +160,47 @@ module Attribute = struct
           F.fprintf f "%s.%a" config_type AbstractValue.pp v
   end
 
+  module Builder = struct
+    type t = Discardable | NonDiscardable [@@deriving compare, equal, show]
+  end
+
   module UninitializedTyp = struct
-    type t = Value | Const of Fieldname.t [@@deriving compare, equal]
+    type t =
+      | Value
+      | Const of Fieldname.t
+      | DictMissingKey of {dict: DecompilerExpr.t; key: Fieldname.t}
+    [@@deriving compare, equal]
 
     let pp f = function
       | Value ->
           F.pp_print_string f "value"
       | Const fld ->
           F.fprintf f "const(%a)" Fieldname.pp fld
+      | DictMissingKey {dict; key} ->
+          F.fprintf f "DictMissingKey(%a, %a)" DecompilerExpr.pp dict Fieldname.pp key
+  end
+
+  module ConstKeys = struct
+    module Metadata = struct
+      (** The metadata contains a timestamp and a trace. The trace is to construct a proper trace of
+          an issue when reporting and the timestamp is to choose the firstly found issue when
+          deduplicating the same missing key accesses. *)
+      type t = Timestamp.t * Trace.t [@@deriving compare, equal]
+
+      let pp fmt (timestamp, trace) =
+        let pp_immediate fmt = F.pp_print_string fmt "immediate" in
+        F.fprintf fmt "(%a, %a)" Timestamp.pp timestamp (Trace.pp ~pp_immediate) trace
+    end
+
+    include PrettyPrintable.MakePPMonoMap (Fieldname) (Metadata)
+
+    let compare = compare Metadata.compare
+
+    let equal = equal Metadata.equal
+
+    let union =
+      union (fun _ left right ->
+          (if Timestamp.compare (fst left) (fst right) <= 0 then left else right) |> Option.some )
   end
 
   type t =
@@ -171,28 +210,30 @@ module Attribute = struct
     | AlwaysReachable
     | Closure of Procname.t
     | ConfigUsage of ConfigUsage.t
-    | ConstString of string
     | CopiedInto of CopiedInto.t
     | CopiedReturn of
         { source: AbstractValue.t
         ; is_const_ref: bool
         ; from: CopyOrigin.t
         ; copied_location: Location.t }
-    | DynamicType of Typ.t * SourceFile.t option
+    | DictContainConstKeys
+    | DictReadConstKeys of ConstKeys.t
     | EndOfCollection
+    | HackBuilder of Builder.t
+    | InReportedRetainCycle
     | Initialized
     | Invalid of Invalidation.t * Trace.t
+    | LastLookup of AbstractValue.t
     | MustBeInitialized of Timestamp.t * Trace.t
     | MustBeValid of Timestamp.t * Trace.t * Invalidation.must_be_valid_reason option
     | MustNotBeTainted of TaintSink.t TaintSinkMap.t
     | JavaResourceReleased
     | CSharpResourceReleased
     | HackAsyncAwaited
-    | PropagateTaintFrom of taint_in list
+    | PropagateTaintFrom of taint_propagation_reason * taint_in list
       (* [v -> PropagateTaintFrom \[v1; ..; vn\]] does not
          retain [v1] to [vn], in fact they should be collected
          when they become unreachable *)
-    | RefCounted
     | ReturnedFromUnknown of AbstractValue.t list
     (* [ret_v -> ReturnedFromUnknown \[v1; ..; vn\]] does not
          retain actuals [v1] to [vn] just like PropagateTaintFrom *)
@@ -223,23 +264,29 @@ module Attribute = struct
 
   let config_usage_rank = Variants.configusage.rank
 
-  let const_string_rank = Variants.conststring.rank
-
   let copied_into_rank = Variants.copiedinto.rank
 
   let copied_return_rank = Variants.copiedreturn.rank
 
   let copy_origin_rank = Variants.sourceoriginofcopy.rank
 
-  let dynamic_type_rank = Variants.dynamictype.rank
+  let dict_contain_const_keys_rank = Variants.dictcontainconstkeys.rank
+
+  let dict_read_const_keys_rank = Variants.dictreadconstkeys.rank
 
   let end_of_collection_rank = Variants.endofcollection.rank
+
+  let hack_builder_rank = Variants.hackbuilder.rank
+
+  let in_reported_retain_cycle_rank = Variants.inreportedretaincycle.rank
 
   let initialized_rank = Variants.initialized.rank
 
   let invalid_rank = Variants.invalid.rank
 
   let java_resource_released_rank = Variants.javaresourcereleased.rank
+
+  let last_lookup_rank = Variants.lastlookup.rank
 
   let hack_async_awaited_rank = Variants.hackasyncawaited.rank
 
@@ -252,8 +299,6 @@ module Attribute = struct
   let must_not_be_tainted_rank = Variants.mustnotbetainted.rank
 
   let propagate_taint_from_rank = Variants.propagatetaintfrom.rank
-
-  let ref_counted_rank = Variants.refcounted.rank
 
   let returned_from_unknown = Variants.returnedfromunknown.rank
 
@@ -296,32 +341,37 @@ module Attribute = struct
         Procname.pp f pname
     | ConfigUsage config ->
         F.fprintf f "ConfigUsage (%a)" ConfigUsage.pp config
-    | ConstString s ->
-        F.fprintf f "ConstString (%s)" s
     | CopiedInto copied_into ->
         CopiedInto.pp f copied_into
     | CopiedReturn {source; is_const_ref; from; copied_location} ->
         F.fprintf f "CopiedReturn (%a%t by %a at %a)" AbstractValue.pp source
           (fun f -> if is_const_ref then F.pp_print_string f ":const&")
           CopyOrigin.pp from Location.pp copied_location
-    | DynamicType (typ, source_file) ->
-        F.fprintf f "DynamicType %a, SourceFile %a" (Typ.pp Pp.text) typ (Pp.option SourceFile.pp)
-          source_file
+    | DictContainConstKeys ->
+        F.pp_print_string f "DictContainConstKeys"
+    | DictReadConstKeys keys ->
+        F.fprintf f "DictReadConstKeys(@[%a@])" ConstKeys.pp keys
     | EndOfCollection ->
         F.pp_print_string f "EndOfCollection"
+    | HackBuilder builderstate ->
+        F.fprintf f "HackBuilder(%a)" Builder.pp builderstate
+    | InReportedRetainCycle ->
+        F.pp_print_string f "InReportedRetainCycle"
     | Initialized ->
         F.pp_print_string f "Initialized"
     | Invalid (invalidation, trace) ->
         F.fprintf f "Invalid %a"
           (Trace.pp ~pp_immediate:(fun fmt -> Invalidation.pp fmt invalidation))
           trace
+    | LastLookup value ->
+        F.fprintf f "LastLookup(%a)" AbstractValue.pp value
     | MustBeInitialized (timestamp, trace) ->
-        F.fprintf f "MustBeInitialized(%a, t=%d)"
+        F.fprintf f "MustBeInitialized(@[@[%a@],@;t=%d@])"
           (Trace.pp ~pp_immediate:(pp_string_if_debug "read"))
           trace
           (timestamp :> int)
     | MustBeValid (timestamp, trace, reason) ->
-        F.fprintf f "MustBeValid(%a, %a, t=%d)"
+        F.fprintf f "MustBeValid(@[@[%a@],@;@[%a@],@;t=%d@])"
           (Trace.pp ~pp_immediate:(pp_string_if_debug "access"))
           trace Invalidation.pp_must_be_valid_reason reason
           (timestamp :> int)
@@ -333,10 +383,9 @@ module Attribute = struct
         F.pp_print_string f "Released"
     | HackAsyncAwaited ->
         F.pp_print_string f "Awaited"
-    | PropagateTaintFrom taints_in ->
-        F.fprintf f "PropagateTaintFrom([%a])" (Pp.seq ~sep:";" pp_taint_in) taints_in
-    | RefCounted ->
-        F.fprintf f "RefCounted"
+    | PropagateTaintFrom (reason, taints_in) ->
+        F.fprintf f "PropagateTaintFrom(%a, [%a])" pp_taint_propagation_reason reason
+          (Pp.seq ~sep:";" pp_taint_in) taints_in
     | ReturnedFromUnknown values ->
         F.fprintf f "ReturnedFromUnknown([%a])" (Pp.seq ~sep:";" AbstractValue.pp) values
     | SourceOriginOfCopy {source; is_const_ref} ->
@@ -370,7 +419,11 @@ module Attribute = struct
 
 
   let is_suitable_for_pre = function
-    | MustBeValid _ | MustBeInitialized _ | MustNotBeTainted _ | RefCounted | UsedAsBranchCond _ ->
+    | DictReadConstKeys _
+    | MustBeValid _
+    | MustBeInitialized _
+    | MustNotBeTainted _
+    | UsedAsBranchCond _ ->
         true
     | Invalid _
     | Allocated _
@@ -379,15 +432,17 @@ module Attribute = struct
     | AlwaysReachable
     | Closure _
     | ConfigUsage _
-    | ConstString _
     | CopiedInto _
     | CopiedReturn _
-    | DynamicType _
+    | DictContainConstKeys
     | EndOfCollection
+    | InReportedRetainCycle
     | Initialized
     | JavaResourceReleased
+    | LastLookup _
     | CSharpResourceReleased
     | HackAsyncAwaited
+    | HackBuilder _ (* TODO: right choice? Planning on doing on the outside in pulse call/return *)
     | PropagateTaintFrom _
     | ReturnedFromUnknown _
     | SourceOriginOfCopy _
@@ -406,6 +461,7 @@ module Attribute = struct
   let is_suitable_for_pre_summary = is_suitable_for_pre
 
   let is_suitable_for_post = function
+    | DictReadConstKeys _
     | MustBeInitialized _
     | MustNotBeTainted _
     | MustBeValid _
@@ -418,18 +474,19 @@ module Attribute = struct
     | AlwaysReachable
     | Closure _
     | ConfigUsage _
-    | ConstString _
     | CopiedInto _
     | CopiedReturn _
-    | DynamicType _
+    | DictContainConstKeys
     | EndOfCollection
+    | InReportedRetainCycle
     | Initialized
     | Invalid _
     | JavaResourceReleased
+    | LastLookup _
     | CSharpResourceReleased
     | HackAsyncAwaited
+    | HackBuilder _ (* TODO: right choice again? *)
     | PropagateTaintFrom _
-    | RefCounted
     | ReturnedFromUnknown _
     | SourceOriginOfCopy _
     | StaticType _
@@ -460,20 +517,22 @@ module Attribute = struct
     | AlwaysReachable
     | Closure _
     | ConfigUsage _
-    | ConstString _
     | CopiedReturn _
-    | DynamicType _
+    | DictContainConstKeys
+    | DictReadConstKeys _
     | EndOfCollection
+    | InReportedRetainCycle
     | Initialized
     | Invalid _
     | JavaResourceReleased
+    | LastLookup _
     | CSharpResourceReleased
     | HackAsyncAwaited
+    | HackBuilder _
     | MustBeInitialized _
     | MustBeValid _
     | MustNotBeTainted _
     | PropagateTaintFrom _
-    | RefCounted
     | ReturnedFromUnknown _
     | StaticType _
     | StdMoved
@@ -501,6 +560,13 @@ module Attribute = struct
         ConfigUsage (StringParam {v= subst v; config_type})
     | CopiedReturn {source; is_const_ref; from; copied_location} ->
         CopiedReturn {source= subst source; is_const_ref; from; copied_location}
+    | DictReadConstKeys const_keys ->
+        DictReadConstKeys
+          (ConstKeys.map
+             (fun (_timestamp, trace) -> (timestamp, add_call_to_trace trace))
+             const_keys )
+    | InReportedRetainCycle ->
+        InReportedRetainCycle
     | Invalid (invalidation, trace) ->
         Invalid (invalidation, add_call_to_trace trace)
     | MustBeValid (_timestamp, trace, reason) ->
@@ -512,15 +578,16 @@ module Attribute = struct
           TaintSink.{taint_sink with trace= add_call_to_trace taint_sink.trace}
         in
         MustNotBeTainted (TaintSinkMap.map add_call_to_sink sinks)
-    | PropagateTaintFrom taints_in ->
+    | PropagateTaintFrom (reason, taints_in) ->
         let add_propagation_event_to_history hist =
           let hist = add_call_to_history hist in
           let propagation_event = ValueHistory.TaintPropagated (call_location, timestamp) in
           ValueHistory.sequence propagation_event hist
         in
         PropagateTaintFrom
-          (List.map taints_in ~f:(fun {v; history} ->
-               {v= subst v; history= add_propagation_event_to_history history} ) )
+          ( reason
+          , List.map taints_in ~f:(fun {v; history} ->
+                {v= subst v; history= add_propagation_event_to_history history} ) )
     | ReturnedFromUnknown values ->
         ReturnedFromUnknown (List.map values ~f:subst)
     | Tainted tainted ->
@@ -558,14 +625,14 @@ module Attribute = struct
       | AlwaysReachable
       | Closure _
       | ConfigUsage (ConfigName _)
-      | ConstString _
       | CSharpResourceReleased
-      | DynamicType _
+      | DictContainConstKeys
       | EndOfCollection
       | HackAsyncAwaited
+      | HackBuilder _
       | Initialized
       | JavaResourceReleased
-      | RefCounted
+      | LastLookup _
       | StaticType _
       | StdMoved
       | StdVectorReserve
@@ -581,7 +648,7 @@ module Attribute = struct
     | CppNewArray, Some (CppDeleteArray, _)
     | ObjCAlloc, _ ->
         true
-    | JavaResource _, _ | CSharpResource _, _ | HackAsync, _ ->
+    | JavaResource _, _ | CSharpResource _, _ | HackAsync, _ | HackBuilderResource _, _ ->
         is_released
     | _ ->
         false
@@ -612,9 +679,9 @@ module Attribute = struct
     match attr with
     | ConfigUsage (StringParam {v= source}) | CopiedReturn {source} ->
         Option.some_if (f_keep source) attr
-    | PropagateTaintFrom taints_in ->
+    | PropagateTaintFrom (reason, taints_in) ->
         filter_aux taints_in ~get_addr:(fun {v} -> v) ~set_addr:(fun v thing -> {thing with v})
-        |> Option.map ~f:(fun taints_in -> PropagateTaintFrom taints_in)
+        |> Option.map ~f:(fun taints_in -> PropagateTaintFrom (reason, taints_in))
     | ReturnedFromUnknown values ->
         filter_aux values ~get_addr:Fn.id ~set_addr:(fun v _ -> v)
         |> Option.map ~f:(fun values -> ReturnedFromUnknown values)
@@ -630,19 +697,21 @@ module Attribute = struct
       | AlwaysReachable
       | Closure _
       | ConfigUsage (ConfigName _)
-      | ConstString _
       | CopiedInto _
       | CSharpResourceReleased
-      | DynamicType _
+      | DictContainConstKeys
+      | DictReadConstKeys _
       | EndOfCollection
       | HackAsyncAwaited
+      | HackBuilder _
+      | InReportedRetainCycle
       | Initialized
       | Invalid _
       | JavaResourceReleased
+      | LastLookup _
       | MustBeInitialized _
       | MustBeValid _
       | MustNotBeTainted _
-      | RefCounted
       | SourceOriginOfCopy _
       | StaticType _
       | StdMoved
@@ -662,6 +731,12 @@ module Attributes = struct
     include PrettyPrintable.MakePPUniqRankSet (Int) (Attribute)
 
     let get_by_rank rank ~dest attrs = find_rank attrs rank |> Option.map ~f:dest
+
+    let get_dict_read_const_keys attrs =
+      get_by_rank Attribute.dict_read_const_keys_rank
+        ~dest:(function[@warning "-partial-match"] DictReadConstKeys keys -> keys)
+        attrs
+
 
     let get_tainted attrs =
       get_by_rank Attribute.tainted_rank
@@ -692,6 +767,13 @@ module Attributes = struct
     let add attrs value =
       let open Attribute in
       match value with
+      | DictReadConstKeys keys ->
+          if ConstKeys.is_empty keys then attrs
+          else
+            let existing_set =
+              Option.value ~default:Attribute.ConstKeys.empty (get_dict_read_const_keys attrs)
+            in
+            update (DictReadConstKeys (ConstKeys.union existing_set keys)) attrs
       | Tainted new_set ->
           if TaintedSet.is_empty new_set then attrs
           else
@@ -713,10 +795,32 @@ module Attributes = struct
               else Some sink2
             in
             update (MustNotBeTainted (TaintSinkMap.union aux new_sinks sinks)) attrs
-      | WrittenTo _ ->
+      | Invalid (OptionalEmpty, _) | WrittenTo _ ->
           update value attrs
       | _ ->
           add attrs value
+
+
+    let remove_must_not_be_tainted ?kinds attrs =
+      let open Attribute in
+      match kinds with
+      | None ->
+          remove_by_rank Attribute.must_not_be_tainted_rank attrs
+      | Some kinds_to_remove -> (
+          let taint_map =
+            get_by_rank Attribute.must_not_be_tainted_rank attrs
+                ~dest:(function [@warning "-partial-match"] MustNotBeTainted map -> map)
+          in
+          match taint_map with
+          | None ->
+              attrs
+          | Some taint_map ->
+              let filtered_map =
+                TaintSinkMap.filter
+                  (fun kind _ -> TaintConfig.Kind.Set.mem kind kinds_to_remove |> not)
+                  taint_map
+              in
+              update (MustNotBeTainted filtered_map) attrs )
   end
 
   let get_by_rank = Set.get_by_rank
@@ -725,6 +829,8 @@ module Attributes = struct
 
   let mem_by_rank rank attrs = Set.find_rank attrs rank |> Option.is_some
 
+  let is_in_reported_retain_cycle = mem_by_rank Attribute.in_reported_retain_cycle_rank
+
   let get_invalid =
     get_by_rank Attribute.invalid_rank ~dest:(function [@warning "-partial-match"]
         | Invalid (invalidation, trace) -> (invalidation, trace) )
@@ -732,7 +838,7 @@ module Attributes = struct
 
   let get_propagate_taint_from =
     get_by_rank Attribute.propagate_taint_from_rank ~dest:(function [@warning "-partial-match"]
-        | PropagateTaintFrom taints_in -> taints_in )
+        | PropagateTaintFrom (reason, taints_in) -> (reason, taints_in) )
 
 
   let remove_propagate_taint_from = remove_by_rank Attribute.propagate_taint_from_rank
@@ -745,6 +851,23 @@ module Attributes = struct
   let is_java_resource_released = mem_by_rank Attribute.java_resource_released_rank
 
   let is_hack_async_awaited = mem_by_rank Attribute.hack_async_awaited_rank
+
+  let get_hack_builder =
+    get_by_rank Attribute.hack_builder_rank ~dest:(function [@warning "-partial-match"]
+        | Attribute.HackBuilder builderstate -> builderstate )
+
+
+  let is_hack_builder_discardable s =
+    match get_hack_builder s with
+    | None ->
+        false
+    | Some Discardable ->
+        true
+    | Some NonDiscardable ->
+        false
+
+
+  let remove_hack_builder = remove_by_rank Attribute.hack_builder_rank
 
   let is_csharp_resource_released = mem_by_rank Attribute.csharp_resource_released_rank
 
@@ -768,11 +891,6 @@ module Attributes = struct
   let get_config_usage =
     get_by_rank Attribute.config_usage_rank ~dest:(function [@warning "-partial-match"]
         | ConfigUsage config -> config )
-
-
-  let get_const_string =
-    get_by_rank Attribute.const_string_rank ~dest:(function [@warning "-partial-match"]
-        | ConstString s -> s )
 
 
   let get_used_as_branch_cond =
@@ -809,6 +927,11 @@ module Attributes = struct
 
   let is_std_vector_reserved = mem_by_rank Attribute.std_vector_reserve_rank
 
+  let get_last_lookup =
+    get_by_rank Attribute.last_lookup_rank ~dest:(function [@warning "-partial-match"]
+        | LastLookup value -> value )
+
+
   let is_modified attrs =
     mem_by_rank Attribute.written_to_rank attrs
     || mem_by_rank Attribute.initialized_rank attrs
@@ -816,6 +939,7 @@ module Attributes = struct
     || mem_by_rank Attribute.unknown_effect_rank attrs
     || mem_by_rank Attribute.java_resource_released_rank attrs
     || mem_by_rank Attribute.hack_async_awaited_rank attrs
+    || mem_by_rank Attribute.hack_builder_rank attrs
     || mem_by_rank Attribute.csharp_resource_released_rank attrs
     || mem_by_rank Attribute.propagate_taint_from_rank attrs
 
@@ -832,8 +956,6 @@ module Attributes = struct
 
   let remove_uninitialized = remove_by_rank Attribute.uninitialized_rank
 
-  let is_ref_counted = mem_by_rank Attribute.ref_counted_rank
-
   let get_allocation =
     get_by_rank Attribute.allocated_rank ~dest:(function [@warning "-partial-match"]
         | Allocated (allocator, trace) -> (allocator, trace) )
@@ -846,10 +968,9 @@ module Attributes = struct
         | UnknownEffect (call, hist) -> (call, hist) )
 
 
-  let get_dynamic_type_source_file =
-    get_by_rank Attribute.dynamic_type_rank ~dest:(function [@warning "-partial-match"]
-        | DynamicType (typ, source_file_opt) -> (typ, source_file_opt) )
+  let remove_dict_contain_const_keys = remove_by_rank Attribute.dict_contain_const_keys_rank
 
+  let is_dict_contain_const_keys = mem_by_rank Attribute.dict_contain_const_keys_rank
 
   let get_must_be_initialized =
     get_by_rank Attribute.must_be_initialized_rank ~dest:(function [@warning "-partial-match"]
@@ -879,6 +1000,8 @@ module Attributes = struct
           is_java_resource_released attributes
           || is_csharp_resource_released attributes
           || is_hack_async_awaited attributes
+          || is_hack_builder_discardable
+               attributes (* Not entirely sure about the definition of this *)
         in
         if Attribute.alloc_free_match allocator invalidation is_released then None
         else allocated_opt )

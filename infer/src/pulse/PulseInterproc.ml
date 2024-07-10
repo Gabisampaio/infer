@@ -21,6 +21,58 @@ open PulseResult.Let_syntax
 
 module AddressSet = AbstractValue.Set
 module AddressMap = AbstractValue.Map
+module HeapPath = Specialization.HeapPath
+
+module LazyHeapPath : sig
+  type t
+
+  val pp : F.formatter -> t -> unit
+
+  val from_pvar : Pvar.t -> t
+
+  val unsupported : t
+
+  val push : Access.t -> t -> t
+
+  val force : t -> HeapPath.t option
+  (** returns None if the stored path contains unsupported memory accesses *)
+end = struct
+  type t = Supported of {stack: Access.t list; pvar: Pvar.t} | Unsupported
+
+  let pp fmt = function
+    | Unsupported ->
+        F.pp_print_string fmt "unsupported"
+    | Supported {stack; pvar} ->
+        Pvar.pp Pp.text fmt pvar ;
+        List.iter stack ~f:(fun access -> F.fprintf fmt " -> %a" Access.pp access)
+
+
+  let from_pvar pvar = Supported {stack= []; pvar}
+
+  let unsupported = Unsupported
+
+  let push access = function
+    | Unsupported ->
+        Unsupported
+    | Supported {stack; pvar} ->
+        Supported {stack= access :: stack; pvar}
+
+
+  let force = function
+    | Unsupported ->
+        None
+    | Supported {stack; pvar} ->
+        (* Note: Specialization.HeapPath.t are reversed *)
+        List.fold_left stack ~init:(Some (HeapPath.Pvar pvar)) ~f:(fun opt_path access ->
+            Option.bind opt_path ~f:(fun path ->
+                match access with
+                | Access.FieldAccess fieldname ->
+                    Some (HeapPath.FieldAccess (fieldname, path))
+                | Access.Dereference ->
+                    Some (HeapPath.Dereference path)
+                | _ ->
+                    None ) )
+end
 
 type callee_index_to_visit =
   { addr_pre_dest: AbstractValue.t
@@ -79,8 +131,9 @@ module Unsafe : sig
     { astate: AbductiveDomain.t  (** caller's abstract state computed so far *)
     ; subst: to_caller_subst
           (** translation from callee addresses to caller addresses and their caller histories *)
-    ; rev_subst: AbstractValue.t AddressMap.t
-          (** the inverse translation from [subst] from caller addresses to callee addresses *)
+    ; rev_subst: (AbstractValue.t * LazyHeapPath.t) AddressMap.t
+          (** the inverse translation from [subst] from caller addresses to callee addresses. We
+              also store the path that leads to the caller adresses in the caller heap *)
     ; hist_map: ValueHistory.t CellId.Map.t
           (** The caller history that corresponds to a specific memory cell in the callee. The
               histories in [subst] are unreliable because the same value can appear several times in
@@ -102,7 +155,11 @@ module Unsafe : sig
               precondition from that particular address. If all goes well we should pick up an error
               (or a contradiction) at the end of applying the precondition. We set this field to
               make sure we actually do, so in case something goes wrong we don't just continue with
-              a broken (partial) summary application. *) }
+              a broken (partial) summary application. *)
+    ; aliases: HeapPath.Set.t HeapPath.Map.t
+          (** if an alias was detected between a [addr_callee] and [addr_callee'] with heap path
+              accesses [path] nad [path'], then [aliases[addr_callee]] contains [addr_callee'],
+              where [rev_subst[addr_caller] = (addr_callee, path)]. *) }
 
   val to_caller_value_ :
        AbductiveDomain.t
@@ -163,11 +220,12 @@ end = struct
   type call_state =
     { astate: AbductiveDomain.t
     ; subst: to_caller_subst
-    ; rev_subst: AbstractValue.t AddressMap.t
+    ; rev_subst: (AbstractValue.t * LazyHeapPath.t) AddressMap.t
     ; hist_map: ValueHistory.t CellId.Map.t
     ; visited: AddressSet.t
     ; array_indices_to_visit: callee_index_to_visit list
-    ; first_error: AbstractValue.t option }
+    ; first_error: AbstractValue.t option
+    ; aliases: HeapPath.Set.t HeapPath.Map.t }
 
   let to_caller_value call_state x = to_caller_value_ call_state.astate call_state.subst x
 
@@ -207,22 +265,32 @@ end
 include Unsafe
 
 let pp_hist_map fmt hist_map =
-  CellId.Map.iteri hist_map ~f:(fun ~key ~data ->
-      F.fprintf fmt "%a: %a," CellId.pp key ValueHistory.pp data )
+  let is_first = ref false in
+  CellId.Map.iter
+    (fun id hist ->
+      if not !is_first then F.pp_print_cut fmt () ;
+      is_first := false ;
+      F.fprintf fmt "%a: @[%a@]" CellId.pp id ValueHistory.pp hist )
+    hist_map
 
 
 let pp_call_state fmt
-    ({astate; subst; rev_subst; hist_map; visited; array_indices_to_visit; first_error}
+    ({astate; subst; rev_subst; hist_map; visited; array_indices_to_visit; first_error; aliases}
       [@warning "+missing-record-field-pattern"] ) =
+  let pp_value_and_path fmt (value, path) =
+    F.fprintf fmt "[value %a from %a]" AbstractValue.pp value LazyHeapPath.pp path
+  in
+  let pp_aliases fmt aliases = HeapPath.Map.pp ~pp_value:HeapPath.Set.pp fmt aliases in
   F.fprintf fmt
-    "@[<v>{ astate=@[<hv2>%a@];@,\
-    \ subst=@[<hv2>%a@];@,\
-    \ rev_subst=@[<hv2>%a@];@,\
-    \ hist_map=@[<hv2>%a@];@,\
-    \ visited=@[<hv2>%a@]@,\
-    \ array_indices_to_visit=@[<hv2>%a@]@,\
-     %t }@]" AbductiveDomain.pp astate pp_to_caller_subst subst
-    (AddressMap.pp ~pp_value:AbstractValue.pp)
+    "@[<v>{ astate=@[%a@];@,\
+    \ subst=@[%a@];@,\
+    \ rev_subst=@[%a@];@,\
+    \ hist_map=@[%a@];@,\
+    \ visited=@[%a@]@,\
+    \ array_indices_to_visit=@[%a@]@,\
+    \ %t@,\
+    \ %a@}@]" AbductiveDomain.pp astate pp_to_caller_subst subst
+    (AddressMap.pp ~pp_value:pp_value_and_path)
     rev_subst pp_hist_map hist_map AddressSet.pp visited
     (Pp.seq (fun _ _ -> ()))
     array_indices_to_visit
@@ -233,9 +301,10 @@ let pp_call_state fmt
           ()
       | Some v ->
           F.fprintf fmt " first_error= ERROR ON %a@," AbstractValue.pp v )
+    pp_aliases aliases
 
 
-let pp_call_state = Pp.html_collapsible_block ~name:"Show/hide the call state" pp_call_state
+let pp_call_state = Pp.html_collapsible_block ~name:"Show/hide the call state" HTML pp_call_state
 
 let to_callee_addr call_state x = AddressMap.find_opt x call_state.rev_subst
 
@@ -245,17 +314,19 @@ type contradiction =
       ; addr_callee: AbstractValue.t
       ; addr_callee': AbstractValue.t
       ; call_state: call_state }
-      (** raised when the precondition and the current state disagree on the aliasing, i.e. some
-          addresses [callee_addr] and [callee_addr'] that are distinct in the pre are aliased to a
-          single address [caller_addr] in the caller's current state. Typically raised when calling
-          [foo(z,z)] where the spec for [foo(x,y)] says that [x] and [y] are disjoint. *)
-  | DynamicTypeNeeded of AbstractValue.t Specialization.HeapPath.Map.t
+  | AliasingWithAllAliases of HeapPath.t list list
+  | DynamicTypeNeeded of AbstractValue.t HeapPath.Map.t
   | CapturedFormalActualLength of
-      { captured_formals: (Var.t * Typ.t) list
+      { captured_formals: (Pvar.t * Typ.t) list
       ; captured_actuals: ((AbstractValue.t * ValueHistory.t) * Typ.t) list }
   | FormalActualLength of
-      {formals: (Var.t * Typ.t) list; actuals: ((AbstractValue.t * ValueHistory.t) * Typ.t) list}
+      {formals: (Pvar.t * Typ.t) list; actuals: ((AbstractValue.t * ValueHistory.t) * Typ.t) list}
   | PathCondition
+
+let pp_aliases fmt aliases =
+  let pp fmt group = F.fprintf fmt "[%a]" (Pp.seq ~sep:";" HeapPath.pp) group in
+  F.fprintf fmt "[%a]" (Pp.seq ~sep:"; " pp) aliases
+
 
 let pp_contradiction fmt = function
   | Aliasing {addr_caller; addr_callee; addr_callee'; call_state} ->
@@ -263,9 +334,11 @@ let pp_contradiction fmt = function
         "address %a in caller already bound to %a, not %a@\nnote: current call state was %a"
         AbstractValue.pp addr_caller AbstractValue.pp addr_callee' AbstractValue.pp addr_callee
         pp_call_state call_state
+  | AliasingWithAllAliases aliases ->
+      F.fprintf fmt "aliases: %a" pp_aliases aliases
   | DynamicTypeNeeded heap_paths ->
       F.fprintf fmt "Heap paths %a need to give their dynamic types"
-        (Specialization.HeapPath.Map.pp ~pp_value:AbstractValue.pp)
+        (HeapPath.Map.pp ~pp_value:AbstractValue.pp)
         heap_paths
   | CapturedFormalActualLength {captured_formals; captured_actuals} ->
       F.fprintf fmt "captured formals have length %d but captured actuals have length %d"
@@ -278,7 +351,7 @@ let pp_contradiction fmt = function
 
 
 let log_contradiction = function
-  | Aliasing _ ->
+  | Aliasing _ | AliasingWithAllAliases _ ->
       Stats.incr_pulse_aliasing_contradictions ()
   | DynamicTypeNeeded _ ->
       ()
@@ -290,17 +363,14 @@ let log_contradiction = function
       ()
 
 
-let is_aliasing_contradiction = function
-  | Aliasing _ ->
-      true
-  | DynamicTypeNeeded _ | CapturedFormalActualLength _ | FormalActualLength _ | PathCondition ->
-      false
-
-
 let is_dynamic_type_needed_contradiction = function
   | DynamicTypeNeeded heap_paths ->
       Some heap_paths
-  | Aliasing _ | CapturedFormalActualLength _ | FormalActualLength _ | PathCondition ->
+  | Aliasing _
+  | AliasingWithAllAliases _
+  | CapturedFormalActualLength _
+  | FormalActualLength _
+  | PathCondition ->
       None
 
 
@@ -359,11 +429,22 @@ let and_restricted_arith ~addr_callee ~addr_caller call_state =
   else Ok call_state
 
 
-let visit call_state ~pre ~addr_callee cell_id ~addr_hist_caller =
+let add_alias call_state ~current_head ~new_elem =
+  let aliases = call_state.aliases in
+  let elems =
+    HeapPath.Map.find_opt current_head aliases
+    |> Option.value ~default:HeapPath.Set.empty
+    |> HeapPath.Set.add new_elem
+  in
+  let aliases = HeapPath.Map.add current_head elems aliases in
+  {call_state with aliases}
+
+
+let visit call_state ~pre ~addr_callee cell_id ~addr_hist_caller path =
   let addr_caller = fst addr_hist_caller in
-  let* call_state =
+  let check_if_alias =
     match to_callee_addr call_state addr_caller with
-    | Some addr_callee' when not (AbstractValue.equal addr_callee addr_callee') ->
+    | Some (addr_callee', path') when not (AbstractValue.equal addr_callee addr_callee') ->
         if
           (* [addr_caller] corresponds to several values in the callee, see if that's a problem for
              applying the pre-condition, i.e. if both values are addresses in the callee's heap,
@@ -373,24 +454,39 @@ let visit call_state ~pre ~addr_callee cell_id ~addr_hist_caller =
           UnsafeMemory.mem addr_callee pre.BaseDomain.heap
           && UnsafeMemory.mem addr_callee' pre.BaseDomain.heap
         then
-          raise_notrace
-            (Contradiction (Aliasing {addr_caller; addr_callee; addr_callee'; call_state}))
-        else and_aliasing_arith ~addr_callee:addr_callee' ~addr_caller0:addr_caller call_state
+          match (LazyHeapPath.force path, LazyHeapPath.force path') with
+          | Some path, Some path' ->
+              `AliasFound (add_alias ~current_head:path' ~new_elem:path call_state)
+          | _ ->
+              (* some path elements are not supported yet, then we gave up with alias specialization *)
+              raise_notrace
+                (Contradiction (Aliasing {addr_caller; addr_callee; addr_callee'; call_state}))
+        else
+          `NoAliasFound
+            (and_aliasing_arith ~addr_callee:addr_callee' ~addr_caller0:addr_caller call_state)
     | _ ->
-        Ok call_state
+        `NoAliasFound (Ok call_state)
   in
-  let* call_state = and_aliasing_arith ~addr_callee ~addr_caller0:addr_caller call_state in
-  let+ call_state = and_restricted_arith ~addr_callee ~addr_caller call_state in
-  if AddressSet.mem addr_callee call_state.visited then (`AlreadyVisited, call_state)
-  else
-    ( `NotAlreadyVisited
-    , { call_state with
-        visited= AddressSet.add addr_callee call_state.visited
-      ; subst= add_to_caller_subst addr_callee addr_hist_caller call_state.subst
-      ; rev_subst= AddressMap.add addr_caller addr_callee call_state.rev_subst
-      ; hist_map=
-          Option.fold cell_id ~init:call_state.hist_map ~f:(fun hist_map cell_id ->
-              CellId.Map.add_exn hist_map ~key:cell_id ~data:(snd addr_hist_caller) ) } )
+  match check_if_alias with
+  | `NoAliasFound call_state ->
+      let* call_state in
+      let* call_state = and_aliasing_arith ~addr_callee ~addr_caller0:addr_caller call_state in
+      let+ call_state = and_restricted_arith ~addr_callee ~addr_caller call_state in
+      let hist_map =
+        Option.fold cell_id ~init:call_state.hist_map ~f:(fun hist_map cell_id ->
+            CellId.Map.add cell_id (snd addr_hist_caller) hist_map )
+      in
+      if AddressSet.mem addr_callee call_state.visited then
+        (`AlreadyVisited, {call_state with hist_map})
+      else
+        ( `NotAlreadyVisited
+        , { call_state with
+            visited= AddressSet.add addr_callee call_state.visited
+          ; subst= add_to_caller_subst addr_callee addr_hist_caller call_state.subst
+          ; rev_subst= AddressMap.add addr_caller (addr_callee, path) call_state.rev_subst
+          ; hist_map } )
+  | `AliasFound call_state ->
+      Ok (`AlreadyVisited, call_state)
 
 
 (** HACK: we don't need to update the [rev_subst] of a call state when generating a fresh value for
@@ -426,8 +522,31 @@ let translate_access_to_caller astate subst (access_callee : Access.t) : _ * Acc
         subst_find_or_new astate subst val_callee ~default_hist_caller:ValueHistory.epoch
       in
       (subst, ArrayAccess (typ, val_caller))
-  | FieldAccess _ | TakeAddress | Dereference ->
+  | FieldAccess _ | Dereference ->
       (subst, access_callee)
+
+
+let check_dict_keys callee call_location ~pre call_state =
+  let keys_to_check =
+    to_caller_subst_fold_constant_astate call_state.astate
+      (fun addr_pre addr_hist_caller keys_to_check ->
+        match UnsafeAttributes.get_dict_read_const_keys addr_pre pre.BaseDomain.attrs with
+        | None ->
+            keys_to_check
+        | Some keys ->
+            (addr_hist_caller, keys) :: keys_to_check )
+      call_state.subst []
+  in
+  PulseResult.list_fold keys_to_check ~init:call_state.astate
+    ~f:(fun astate ((addr_caller, hist_caller), keys) ->
+      PulseResult.container_fold
+        ~fold:(IContainer.fold_of_pervasives_map_fold Attribute.ConstKeys.fold) keys ~init:astate
+        ~f:(fun astate (key, (timestamp, trace)) ->
+          let trace =
+            Trace.ViaCall
+              {f= Call callee; location= call_location; history= hist_caller; in_call= trace}
+          in
+          PulseOperations.add_dict_read_const_key timestamp trace addr_caller key astate ) )
 
 
 (* {3 reading the pre from the current state} *)
@@ -435,9 +554,10 @@ let translate_access_to_caller astate subst (access_callee : Access.t) : _ * Acc
 (** Materialize the (abstract memory) subgraph of [pre] reachable from [addr_pre] in
     [call_state.astate] starting from address [addr_caller]. Report an error if some invalid
     addresses are traversed in the process. *)
-let rec materialize_pre_from_address ~pre ~addr_pre cell_id ~addr_hist_caller call_state =
+let rec materialize_pre_from_address callee call_location ~pre ~addr_pre cell_id ~addr_hist_caller
+    path call_state =
   let* visited_status, call_state =
-    visit call_state ~pre ~addr_callee:addr_pre cell_id ~addr_hist_caller
+    visit call_state ~pre ~addr_callee:addr_pre cell_id ~addr_hist_caller path
   in
   match visited_status with
   | `AlreadyVisited ->
@@ -475,8 +595,9 @@ let rec materialize_pre_from_address ~pre ~addr_pre cell_id ~addr_hist_caller ca
                 first_error= Option.first_some call_state.first_error (Some (fst addr_hist_caller))
               }
         | Ok () ->
-            PulseResult.container_fold ~fold:UnsafeMemory.Edges.fold ~init:call_state edges_pre
-              ~f:(fun call_state (access_callee, (addr_pre_dest, pre_hist)) ->
+            let* astate = check_dict_keys callee call_location ~pre call_state in
+            PulseResult.container_fold ~fold:UnsafeMemory.Edges.fold ~init:{call_state with astate}
+              edges_pre ~f:(fun call_state (access_callee, (addr_pre_dest, pre_hist)) ->
                 match (access_callee : Access.t) with
                 | ArrayAccess _ ->
                     Ok
@@ -484,20 +605,21 @@ let rec materialize_pre_from_address ~pre ~addr_pre cell_id ~addr_hist_caller ca
                         array_indices_to_visit=
                           {addr_pre_dest; pre_hist; access_callee; addr_hist_caller}
                           :: call_state.array_indices_to_visit }
-                | FieldAccess _ | TakeAddress | Dereference ->
+                | FieldAccess _ | Dereference ->
                     (* only array accessess depend on abstract values and need translation *)
                     let access_caller = access_callee in
                     let astate, addr_hist_dest_caller =
                       Memory.eval_edge addr_hist_caller access_caller call_state.astate
                     in
                     let call_state = {call_state with astate} in
-                    materialize_pre_from_address ~pre ~addr_pre:addr_pre_dest
-                      (ValueHistory.get_cell_id pre_hist)
-                      ~addr_hist_caller:addr_hist_dest_caller call_state ) ) )
+                    let path = LazyHeapPath.push access_callee path in
+                    materialize_pre_from_address callee call_location ~pre ~addr_pre:addr_pre_dest
+                      (ValueHistory.get_cell_id_exn pre_hist)
+                      ~addr_hist_caller:addr_hist_dest_caller path call_state ) ) )
 
 
-let materialize_pre_from_array_index ~pre {addr_pre_dest; pre_hist; access_callee; addr_hist_caller}
-    call_state =
+let materialize_pre_from_array_index callee call_location ~pre
+    {addr_pre_dest; pre_hist; access_callee; addr_hist_caller} path call_state =
   let subst, access_caller =
     translate_access_to_caller call_state.astate call_state.subst access_callee
   in
@@ -507,16 +629,18 @@ let materialize_pre_from_array_index ~pre {addr_pre_dest; pre_hist; access_calle
   let call_state = {call_state with astate; subst} in
   (* HACK: we should probably visit the value in the (array) access too, but since it's a value
      normally it shouldn't appear in the heap anyway so there should be nothing to visit. *)
-  materialize_pre_from_address ~pre ~addr_pre:addr_pre_dest
-    (ValueHistory.get_cell_id pre_hist)
-    ~addr_hist_caller:addr_hist_dest_caller call_state
+  materialize_pre_from_address callee call_location ~pre ~addr_pre:addr_pre_dest
+    (ValueHistory.get_cell_id_exn pre_hist)
+    ~addr_hist_caller:addr_hist_dest_caller path call_state
 
 
-let materialize_pre_from_array_indices ~pre call_state =
+let materialize_pre_from_array_indices callee call_location ~pre call_state =
+  let path = LazyHeapPath.unsupported in
   let+ call_state =
     PulseResult.list_fold call_state.array_indices_to_visit ~init:call_state
       ~f:(fun call_state array_index_to_translate ->
-        materialize_pre_from_array_index ~pre array_index_to_translate call_state )
+        materialize_pre_from_array_index callee call_location ~pre array_index_to_translate path
+          call_state )
   in
   {call_state with array_indices_to_visit= []}
 
@@ -527,26 +651,30 @@ let callee_deref_non_c_struct addr typ astate =
       Some (addr, None)
   | _ ->
       UnsafeMemory.find_edge_opt addr Dereference astate
-      |> Option.map ~f:(fun (value, hist) -> (value, ValueHistory.get_cell_id hist))
+      |> Option.map ~f:(fun (value, hist) -> (value, ValueHistory.get_cell_id_exn hist))
 
 
 (** materialize subgraph of [pre] rooted at the address represented by a [formal] parameter that has
     been instantiated with the corresponding [actual] into the current state [call_state.astate] *)
-let materialize_pre_from_actual ~pre ~formal:(formal, typ) ~actual:(actual, _) call_state =
+let materialize_pre_from_actual callee call_location ~pre ~formal:(formal, typ) ~actual:(actual, _)
+    call_state =
+  let path = LazyHeapPath.from_pvar formal in
+  let formal = Var.of_pvar formal in
   L.d_printfln "Materializing PRE from [%a <- %a]" Var.pp formal AbstractValue.pp (fst actual) ;
   (let open IOption.Let_syntax in
    let* addr_formal_pre, _ = UnsafeStack.find_opt formal pre.BaseDomain.stack in
    let+ formal_pre, cell_id = callee_deref_non_c_struct addr_formal_pre typ pre.BaseDomain.heap in
-   materialize_pre_from_address ~pre ~addr_pre:formal_pre cell_id ~addr_hist_caller:actual
-     call_state )
+   materialize_pre_from_address callee call_location ~pre ~addr_pre:formal_pre cell_id
+     ~addr_hist_caller:actual path call_state )
   |> function Some result -> result | None -> Ok call_state
 
 
-let materialize_pre_for_captured_vars ~pre ~captured_formals ~captured_actuals call_state =
+let materialize_pre_for_captured_vars callee call_location ~pre ~captured_formals ~captured_actuals
+    call_state =
   match
     PulseResult.list_fold2 captured_formals captured_actuals ~init:call_state
       ~f:(fun call_state formal actual ->
-        materialize_pre_from_actual ~pre ~formal ~actual call_state )
+        materialize_pre_from_actual callee call_location ~pre ~formal ~actual call_state )
   with
   | Unequal_lengths ->
       raise_notrace (Contradiction (CapturedFormalActualLength {captured_formals; captured_actuals}))
@@ -554,13 +682,13 @@ let materialize_pre_for_captured_vars ~pre ~captured_formals ~captured_actuals c
       result
 
 
-let materialize_pre_for_parameters ~pre ~formals ~actuals call_state =
+let materialize_pre_for_parameters callee call_location ~pre ~formals ~actuals call_state =
   (* For each [(formal, actual)] pair, resolve them to addresses in their respective states then
      call [materialize_pre_from] on them.  Give up if calling the function introduces aliasing.
   *)
   match
     PulseResult.list_fold2 formals actuals ~init:call_state ~f:(fun call_state formal actual ->
-        materialize_pre_from_actual ~pre ~formal ~actual call_state )
+        materialize_pre_from_actual callee call_location ~pre ~formal ~actual call_state )
   with
   | Unequal_lengths ->
       raise_notrace (Contradiction (FormalActualLength {formals; actuals}))
@@ -568,12 +696,13 @@ let materialize_pre_for_parameters ~pre ~formals ~actuals call_state =
       result
 
 
-let materialize_pre_for_globals path call_location ~pre call_state =
+let materialize_pre_for_globals path callee call_location ~pre call_state =
   fold_globals_of_callee_stack path call_location pre.BaseDomain.stack call_state
-    ~f:(fun _var ~stack_value:(addr_pre, pre_hist) ~addr_hist_caller call_state ->
-      materialize_pre_from_address ~pre ~addr_pre
-        (ValueHistory.get_cell_id pre_hist)
-        ~addr_hist_caller call_state )
+    ~f:(fun pvar ~stack_value:(addr_pre, pre_hist) ~addr_hist_caller call_state ->
+      let path = LazyHeapPath.from_pvar pvar in
+      materialize_pre_from_address callee call_location ~pre ~addr_pre
+        (ValueHistory.get_cell_id_exn pre_hist)
+        ~addr_hist_caller path call_state )
 
 
 let conjoin_callee_arith callee_path_condition call_state =
@@ -649,14 +778,15 @@ let materialize_pre path callee_proc_name call_location callee_summary ~captured
   let r =
     let callee_precondition = AbductiveDomain.Summary.get_pre callee_summary in
     (* first make as large a mapping as we can between callee values and caller values... *)
-    materialize_pre_for_parameters ~pre:callee_precondition ~formals ~actuals call_state
-    >>= materialize_pre_for_captured_vars ~pre:callee_precondition ~captured_formals
-          ~captured_actuals
-    >>= materialize_pre_for_globals path call_location ~pre:callee_precondition
+    materialize_pre_for_parameters callee_proc_name call_location ~pre:callee_precondition ~formals
+      ~actuals call_state
+    >>= materialize_pre_for_captured_vars callee_proc_name call_location ~pre:callee_precondition
+          ~captured_formals ~captured_actuals
+    >>= materialize_pre_for_globals path callee_proc_name call_location ~pre:callee_precondition
     >>= (* ...then relational arithmetic constraints in the callee's attributes will make sense in
            terms of the caller's values *)
     conjoin_callee_arith (AbductiveDomain.Summary.get_path_condition callee_summary)
-    >>= materialize_pre_from_array_indices ~pre:callee_precondition
+    >>= materialize_pre_from_array_indices callee_proc_name call_location ~pre:callee_precondition
     >>| add_attributes `Pre path callee_proc_name call_location callee_precondition.attrs
   in
   PerfEvent.(log (fun logger -> log_end_event logger ())) ;
@@ -708,14 +838,14 @@ let record_post_cell ({PathContext.timestamp} as path) callee_proc_name call_loc
     ~edges_callee_post (addr_caller, hist_caller) call_state =
   let subst, translated_post_edges =
     UnsafeMemory.Edges.fold ~init:(call_state.subst, BaseMemory.Edges.empty) edges_callee_post
-      ~f:(fun (subst, translated_edges) (access_callee, (addr_callee, trace_post)) ->
+      ~f:(fun (subst, translated_edges) (access_callee, (addr_callee, hist_post)) ->
         let subst, (addr_curr, hist_curr) =
           subst_find_or_new call_state.astate subst addr_callee ~default_hist_caller:hist_caller
         in
         let hist_caller =
           let open Option.Monad_infix in
-          ValueHistory.get_cell_id trace_post
-          >>= CellId.Map.find call_state.hist_map
+          ValueHistory.get_cell_ids hist_post
+          >>= ValueHistory.of_cell_ids_in_map call_state.hist_map
           |> Option.value ~default:hist_curr
         in
         let subst, access = translate_access_to_caller call_state.astate subst access_callee in
@@ -723,7 +853,7 @@ let record_post_cell ({PathContext.timestamp} as path) callee_proc_name call_loc
           UnsafeMemory.Edges.add access
             ( addr_curr
             , ValueHistory.sequence ~context:path.conditions
-                (Call {f= Call callee_proc_name; location= call_loc; in_call= trace_post; timestamp})
+                (Call {f= Call callee_proc_name; location= call_loc; in_call= hist_post; timestamp})
                 hist_caller )
             translated_edges
         in
@@ -806,6 +936,54 @@ let apply_post_from_callee_post path callee_proc_name call_location callee_summa
     (AbductiveDomain.Summary.get_post callee_summary).heap (Ok call_state)
 
 
+let report_mutual_recursion_cycle
+    ({InterproceduralAnalysis.add_errlog; proc_desc; err_log} as analysis_data) cycle =
+  let proc_name = Procdesc.get_proc_name proc_desc in
+  PulseMutualRecursion.iter_rotations cycle ~f:(fun cycle ->
+      let inner_call = PulseMutualRecursion.get_inner_call cycle in
+      let location = PulseMutualRecursion.get_outer_location cycle in
+      match Procdesc.load inner_call with
+      | None ->
+          (* cannot happen but also if the procedure is undefined then we shouldn't report
+             anyway *)
+          ()
+      | Some inner_proc_desc ->
+          let is_foreign_procedure = not (Procname.equal inner_call proc_name) in
+          let report_analysis_data, err_log =
+            if is_foreign_procedure then
+              let err_log = Errlog.empty () in
+              (InterproceduralAnalysis.for_procedure inner_proc_desc err_log analysis_data, err_log)
+            else (analysis_data, err_log)
+          in
+          L.d_printfln "reporting on procedure %a (foreign=%b) at %a" Procname.pp inner_call
+            is_foreign_procedure Location.pp_file_pos location ;
+          PulseReport.report report_analysis_data ~is_suppressed:false ~latent:false
+            (MutualRecursionCycle {cycle; location}) ;
+          if is_foreign_procedure then add_errlog inner_call err_log )
+
+
+let report_recursive_calls ({InterproceduralAnalysis.proc_desc} as analysis_data) cycles =
+  PulseMutualRecursion.Set.iter
+    (fun cycle ->
+      if
+        Procname.equal
+          (PulseMutualRecursion.get_inner_call cycle)
+          (Procdesc.get_proc_name proc_desc)
+      then report_mutual_recursion_cycle analysis_data cycle )
+    cycles
+
+
+let record_recursive_calls analysis_data callee_proc_name call_loc callee_summary call_state =
+  let callee_recursive_calls =
+    PulseMutualRecursion.Set.map
+      (PulseMutualRecursion.add_call callee_proc_name call_loc)
+      (AbductiveDomain.Summary.get_recursive_calls callee_summary)
+  in
+  report_recursive_calls analysis_data callee_recursive_calls ;
+  let astate = AbductiveDomain.add_recursive_calls callee_recursive_calls call_state.astate in
+  {call_state with astate}
+
+
 let record_skipped_calls callee_proc_name call_loc callee_summary call_state =
   let callee_skipped_calls =
     SkippedCalls.map
@@ -819,18 +997,15 @@ let record_skipped_calls callee_proc_name call_loc callee_summary call_state =
   {call_state with astate}
 
 
-let record_need_closure_specialization callee_summary call_state =
-  if AbductiveDomain.Summary.need_closure_specialization callee_summary then
-    {call_state with astate= AbductiveDomain.set_need_closure_specialization call_state.astate}
-  else call_state
-
-
-let record_transitive_accesses callee_proc_name call_loc callee_summary call_state =
-  let astate =
-    AbductiveDomain.Summary.transfer_accesses_to_caller call_state.astate callee_proc_name call_loc
-      callee_summary
-  in
-  {call_state with astate}
+let record_transitive_info {InterproceduralAnalysis.tenv} callee_proc_name call_location
+    callee_summary call_state =
+  if PulseTransitiveAccessChecker.should_skip_call tenv callee_proc_name then call_state
+  else
+    let astate =
+      AbductiveDomain.transfer_transitive_info_to_caller callee_proc_name call_location
+        callee_summary call_state.astate
+    in
+    {call_state with astate}
 
 
 let apply_unknown_effects callee_summary call_state =
@@ -840,7 +1015,7 @@ let apply_unknown_effects callee_summary call_state =
     match to_callee_addr call_state addr_caller with
     | None ->
         false
-    | Some addr_callee ->
+    | Some (addr_callee, _) ->
         let edges_callee_pre =
           UnsafeMemory.find_opt addr_callee (AbductiveDomain.Summary.get_pre callee_summary).heap
           |> Option.value ~default:BaseMemory.Edges.empty
@@ -891,7 +1066,7 @@ let read_return_value {PathContext.conditions; timestamp} callee_proc_name call_
     | None ->
         (call_state, None)
     | Some (return_callee, return_callee_hist) ->
-        let return_caller, return_caller_hist =
+        let return_caller, default_return_caller_hist =
           match to_caller_value call_state return_callee with
           | Some return_caller_hist ->
               return_caller_hist
@@ -905,7 +1080,10 @@ let read_return_value {PathContext.conditions; timestamp} callee_proc_name call_
             (Call
                {f= Call callee_proc_name; location= call_loc; in_call= return_callee_hist; timestamp}
             )
-            return_caller_hist
+            (let open Option.Monad_infix in
+             ValueHistory.get_cell_ids return_callee_hist
+             >>= ValueHistory.of_cell_ids_in_map call_state.hist_map
+             |> Option.value ~default:default_return_caller_hist )
         in
         ( call_state
         , Some
@@ -913,7 +1091,7 @@ let read_return_value {PathContext.conditions; timestamp} callee_proc_name call_
         ) )
 
 
-let apply_post path callee_proc_name call_location callee_summary call_state =
+let apply_post analysis_data path callee_proc_name call_location callee_summary call_state =
   PerfEvent.(log (fun logger -> log_begin_event logger ~name:"pulse call post" ())) ;
   let r =
     call_state
@@ -922,9 +1100,9 @@ let apply_post path callee_proc_name call_location callee_summary call_state =
     >>= apply_post_from_callee_post path callee_proc_name call_location callee_summary
     >>| add_attributes `Post path callee_proc_name call_location
           (AbductiveDomain.Summary.get_post callee_summary).attrs
+    >>| record_recursive_calls analysis_data callee_proc_name call_location callee_summary
     >>| record_skipped_calls callee_proc_name call_location callee_summary
-    >>| record_need_closure_specialization callee_summary
-    >>| record_transitive_accesses callee_proc_name call_location callee_summary
+    >>| record_transitive_info analysis_data callee_proc_name call_location callee_summary
     >>| read_return_value path callee_proc_name call_location callee_summary
   in
   PerfEvent.(log (fun logger -> log_end_event logger ())) ;
@@ -1021,7 +1199,7 @@ let check_all_taint_valid path callee_proc_name call_location callee_summary ast
           let sink_and_trace =
             ({TaintItem.kinds= [kind]; value_tuple= sink}, trace_via_call trace)
           in
-          let+ _, astate =
+          let+ astate =
             PulseTaintOperations.check_flows_wrt_sink path call_location ~sink:sink_and_trace
               ~source:addr_hist_caller astate
           in
@@ -1037,8 +1215,8 @@ let check_all_taint_valid path callee_proc_name call_location callee_summary ast
    - for each actual, write the post for that actual
 
    - if aliasing is introduced at any time then give up *)
-let apply_summary path callee_proc_name call_location ~callee_summary ~captured_formals
-    ~captured_actuals ~formals ~actuals astate =
+let apply_summary analysis_data path ~callee_proc_name call_location ~callee_summary
+    ~captured_formals ~captured_actuals ~formals ~actuals astate =
   let aux () =
     let empty_call_state =
       { astate
@@ -1047,7 +1225,8 @@ let apply_summary path callee_proc_name call_location ~callee_summary ~captured_
       ; hist_map= CellId.Map.empty
       ; visited= AddressSet.empty
       ; array_indices_to_visit= []
-      ; first_error= None }
+      ; first_error= None
+      ; aliases= HeapPath.Map.empty }
     in
     (* read the precondition *)
     match
@@ -1060,6 +1239,18 @@ let apply_summary path callee_proc_name call_location ~callee_summary ~captured_
         L.d_printfln ~color:Orange "Cannot apply precondition: %a@\n" pp_contradiction reason ;
         log_contradiction reason ;
         (Unsat, Some reason)
+    | Ok {aliases} when HeapPath.Map.is_empty aliases |> not ->
+        L.d_printfln ~color:Orange "Aliases found: %a@\n"
+          (HeapPath.Map.pp ~pp_value:HeapPath.Set.pp)
+          aliases ;
+        let aliases =
+          HeapPath.Map.fold
+            (fun path set aliases ->
+              let new_alias_group = HeapPath.Set.add path set |> HeapPath.Set.elements in
+              new_alias_group :: aliases )
+            aliases []
+        in
+        (Unsat, Some (AliasingWithAllAliases aliases))
     | result -> (
       try
         let pre_astate, pre_subst =
@@ -1094,7 +1285,7 @@ let apply_summary path callee_proc_name call_location ~callee_summary ~captured_
           let call_state = {call_state with astate; visited= AddressSet.empty} in
           (* apply the postcondition *)
           let* call_state, return_caller =
-            apply_post path callee_proc_name call_location callee_summary call_state
+            apply_post analysis_data path callee_proc_name call_location callee_summary call_state
           in
           let astate =
             if Topl.is_active () then
@@ -1124,26 +1315,25 @@ let apply_summary path callee_proc_name call_location ~callee_summary ~captured_
           let callee_heap_paths =
             AbductiveDomain.Summary.heap_paths_that_need_dynamic_type_specialization callee_summary
           in
-          if Specialization.HeapPath.Map.is_empty callee_heap_paths then None
+          if HeapPath.Map.is_empty callee_heap_paths then None
           else
             let caller_heap_paths =
-              Specialization.HeapPath.Map.fold
+              HeapPath.Map.fold
                 (fun heap_path addr map ->
                   match to_caller_value_ pre_astate pre_subst addr with
                   | Some (addr_in_caller, _) ->
                       L.d_printfln
                         "dynamic type is required for address %a reachable from heap path %a in \
                          callee (%a in caller)"
-                        AbstractValue.pp addr Specialization.HeapPath.pp heap_path AbstractValue.pp
-                        addr_in_caller ;
-                      Specialization.HeapPath.Map.add heap_path addr_in_caller map
+                        AbstractValue.pp addr HeapPath.pp heap_path AbstractValue.pp addr_in_caller ;
+                      HeapPath.Map.add heap_path addr_in_caller map
                   | None ->
                       L.d_printfln
                         "dynamic type is required for address %a reachable from heap path %a in \
                          callee (not found in caller)"
-                        AbstractValue.pp addr Specialization.HeapPath.pp heap_path ;
+                        AbstractValue.pp addr HeapPath.pp heap_path ;
                       map )
-                callee_heap_paths Specialization.HeapPath.Map.empty
+                callee_heap_paths HeapPath.Map.empty
             in
             Some (DynamicTypeNeeded caller_heap_paths)
         in
@@ -1153,11 +1343,11 @@ let apply_summary path callee_proc_name call_location ~callee_summary ~captured_
         log_contradiction reason ;
         (Unsat, Some reason) )
   in
-  let pp_formals = Pp.seq ~sep:"," (fun f (var, _) -> Var.pp f var) in
+  let pp_formals = Pp.seq ~sep:"," (fun f (var, _) -> Var.pp f (Var.of_pvar var)) in
   let pp_summary =
-    Pp.html_collapsible_block ~name:"Show/hide the summary" AbductiveDomain.Summary.pp
+    Pp.html_collapsible_block ~name:"Show/hide the summary" HTML AbductiveDomain.Summary.pp
   in
-  L.d_with_indent ~collapsible:true "Applying pre/post for %a(%a):" Procname.pp callee_proc_name
+  L.with_indent ~collapsible:true "Applying pre/post for %a(%a):" Procname.pp callee_proc_name
     pp_formals formals ~f:(fun () ->
       L.d_printfln "%a" pp_summary callee_summary ;
       aux () )
@@ -1172,12 +1362,12 @@ let merge_contradictions contradiction1 contradiction2 =
       contradiction
   | Some (DynamicTypeNeeded heapmap1), Some (DynamicTypeNeeded heapmap2) ->
       let heapmap =
-        Specialization.HeapPath.Map.fold
+        HeapPath.Map.fold
           (fun path addr map ->
             (* we may end up in a strange situation where [path] is bound in both
                [heapmap1] and [heapmap2], but since [path] is a heap path in the
                precondition space, we do not expect the binding to matter *)
-            Specialization.HeapPath.Map.add path addr map )
+            HeapPath.Map.add path addr map )
           heapmap2 heapmap1
       in
       Some (DynamicTypeNeeded heapmap)

@@ -470,7 +470,7 @@ let rec create_strexp_of_type ~path tenv struct_init_mode (typ : Typ.t) len inst
       | Fld_init, Some {fields} ->
           (* pass len as an accumulator, so that it is passed to create_strexp_of_type for the last
              field, but always return None so that only the last field receives len *)
-          let f (fld, t, _) (flds, len) =
+          let f {Struct.name= fld; typ= t} (flds, len) =
             ( ( fld
               , create_strexp_of_type ~path:((name, fld) :: path) tenv struct_init_mode t len inst
               )
@@ -542,9 +542,8 @@ let sigma_get_unsigned_exps sigma =
   !uexps
 
 
-(** Collapse consecutive indices that should be added. For instance, this function reduces
-    [x\[1\]\[1\]] to [x\[2\]]. The [typ] argument is used to ensure the soundness of this
-    collapsing. *)
+(** Collapse consecutive indices that should be added. For instance, this function reduces [x[1][1]]
+    to [x[2]]. The [typ] argument is used to ensure the soundness of this collapsing. *)
 let exp_collapse_consecutive_indices_prop (typ : Typ.t) exp =
   let typ_is_base (typ1 : Typ.t) =
     match typ1.desc with Tint _ | Tfloat _ | Tstruct _ | Tvoid | Tfun -> true | _ -> false
@@ -1474,13 +1473,17 @@ module Normalize = struct
           , Sizeof {typ= {desc= Tarray {elt}} as arr} )
           when Typ.equal t elt ->
             let dynamic_length = Some x in
-            let sizeof_data = {Exp.typ= arr; nbytes= None; dynamic_length; subtype= st1} in
+            let sizeof_data =
+              {Exp.typ= arr; nbytes= None; dynamic_length; subtype= st1; nullable= false}
+            in
             let hpred' = mk_ptsto_exp tenv Fld_init (root, Sizeof sizeof_data, None) inst in
             replace_hpred (replace_array_contents hpred' esel)
         | ( Earray (BinOp (Mult _, x, Sizeof {typ; dynamic_length= None; subtype}), esel, inst)
           , Sizeof {typ= {desc= Tarray {elt}} as arr} )
           when Typ.equal typ elt ->
-            let sizeof_data = {Exp.typ= arr; nbytes= None; dynamic_length= Some x; subtype} in
+            let sizeof_data =
+              {Exp.typ= arr; nbytes= None; dynamic_length= Some x; subtype; nullable= false}
+            in
             let hpred' = mk_ptsto_exp tenv Fld_init (root, Sizeof sizeof_data, None) inst in
             replace_hpred (replace_array_contents hpred' esel)
         | ( Earray
@@ -1490,7 +1493,11 @@ module Normalize = struct
           , Sizeof {typ= {desc= Tarray {elt}} as arr} )
           when Typ.equal typ elt ->
             let sizeof_data =
-              {Exp.typ= arr; nbytes= None; dynamic_length= Some (Exp.BinOp (omult, x, len)); subtype}
+              { Exp.typ= arr
+              ; nbytes= None
+              ; dynamic_length= Some (Exp.BinOp (omult, x, len))
+              ; subtype
+              ; nullable= false }
             in
             let hpred' = mk_ptsto_exp tenv Fld_init (root, Sizeof sizeof_data, None) inst in
             replace_hpred (replace_array_contents hpred' esel)
@@ -1501,7 +1508,11 @@ module Normalize = struct
           , Sizeof {typ= {desc= Tarray {elt}} as arr} )
           when Typ.equal typ elt ->
             let sizeof_data =
-              {Exp.typ= arr; nbytes= None; dynamic_length= Some (Exp.BinOp (omult, x, len)); subtype}
+              { Exp.typ= arr
+              ; nbytes= None
+              ; dynamic_length= Some (Exp.BinOp (omult, x, len))
+              ; subtype
+              ; nullable= false }
             in
             let hpred' = mk_ptsto_exp tenv Fld_init (root, Sizeof sizeof_data, None) inst in
             replace_hpred (replace_array_contents hpred' esel)

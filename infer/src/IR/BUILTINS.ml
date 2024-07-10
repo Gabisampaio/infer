@@ -11,8 +11,6 @@ open! IStd
 module type S = sig
   type t
 
-  val __array_access : t
-
   val __assert_fail : t
 
   val __builtin_add_overflow : t
@@ -50,8 +48,6 @@ module type S = sig
 
   val __get_type_of : t
 
-  val __global_access : t
-
   val __infer_assume : t
 
   val __infer_fail : t
@@ -65,6 +61,9 @@ module type S = sig
   val __java_throw : t
   (** [__java_throw] implements java's throw instruction (without arg yet, but this is covered by
       the usage of the return variable during frontend translation *)
+
+  val __hack_throw : t
+  (* [__hack_throw] also doesn't take an argument as that is dealt with by the Textual translation *)
 
   val __method_set_ignore_attribute : t
 

@@ -12,9 +12,32 @@ async function an_async_not_starting_with_gen(): Awaitable<int> {
   return 42;
 }
 
-// this is not async even though the name starts with "gen"
-function generate_a_boolean(): bool {
-  return true;
+interface ISomeNames {
+  public function generate_a_boolean(): Awaitable<bool>;
+  public function genFoo(): Awaitable<int>;
+  public function gena(): Awaitable<int>;
+  public function genvxHH45(): Awaitable<int>;
+}
+
+// tests for ugly naming rules, deliberately reference unknown functions
+async function testnamingOK(ISomeNames $x): Awaitable<void> {
+  $_ = $x->generate_a_boolean(); // should not error
+}
+
+async function testnamingBad(ISomeNames $x): Awaitable<void> {
+  $_ = $x->genFoo(); // should error
+}
+
+async function testnamingBad2(ISomeNames $x): Awaitable<void> {
+  $_ = $x->gena(); // should error
+}
+
+async function testnamingBad3(): Awaitable<void> {
+  $_ = an_async_not_starting_with_gen(); // should error because we know decl
+}
+
+async function testnamingBad4(ISomeNames $x): Awaitable<void> {
+  $_ = $x->genvxHH45(); // should error
 }
 
 async function genOk(): Awaitable<void> {
@@ -27,7 +50,7 @@ async function genOK2(): Awaitable<void> {
 }
 
 async function genBad(): Awaitable<void> {
-  genInt();
+  $_ = genInt();
 }
 
 async function genBad2(): Awaitable<void> {
@@ -39,7 +62,7 @@ function produce_awaitable_int(): Awaitable<int> {
 }
 
 async function genBadIndirect(): Awaitable<void> {
-  produce_awaitable_int();
+  $_ = produce_awaitable_int();
 }
 
 async function genOkIndirect(): Awaitable<void> {
@@ -57,12 +80,21 @@ async function genDontAwaitParam(Awaitable<int> $a): Awaitable<void> {
 
 async function genAndAwaitOk(): Awaitable<void> {
   $x = genInt();
-  genAwaitParam($x);
+  await genAwaitParam($x);
   return;
 }
 
 async function genAndAwaitBad(): Awaitable<void> {
   $x = genInt();
-  genDontAwaitParam($x);
+  await genDontAwaitParam($x);
   return;
+}
+
+class LikeLocaleDetector {
+  private static ?Awaitable<int> $context = null;
+
+  public async function genSetContext(): Awaitable<int> {
+    self::$context = genInt();
+    return await self::$context;
+  }
 }

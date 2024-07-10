@@ -211,10 +211,6 @@ let directory_iter f path =
 let string_crc_hex32 s = Caml.Digest.to_hex (Caml.Digest.string s)
 
 let read_json_file path =
-  try Ok (Yojson.Basic.from_file path) with Sys_error msg | Yojson.Json_error msg -> Error msg
-
-
-let read_safe_json_file path =
   try Ok (Yojson.Safe.from_file path) with Sys_error msg | Yojson.Json_error msg -> Error msg
 
 
@@ -275,7 +271,7 @@ let with_intermediate_temp_file_out ?(retry = false) file ~f =
 
 
 let write_json_to_file destfile json =
-  with_file_out destfile ~f:(fun oc -> Yojson.Basic.pretty_to_channel oc json)
+  with_file_out destfile ~f:(fun oc -> Yojson.Safe.pretty_to_channel oc json)
 
 
 let with_channel_in ~f chan_in =
@@ -381,16 +377,20 @@ let iter_dir name ~f =
   iter dir
 
 
+let is_string_in_list_option list_opt s =
+  Option.exists list_opt ~f:(fun l -> List.mem ~equal:String.equal l s)
+
+
 (** delete [name] recursively, return whether the file is not there at the end *)
-let rec rmtree_ ?(except = []) name =
+let rec rmtree_ ?except name =
   match (Unix.lstat name).st_kind with
   | S_DIR ->
-      if rm_all_in_dir_ ~except name then (
+      if rm_all_in_dir_ ?except name then (
         Unix.rmdir name ;
         true )
       else false
   | _ ->
-      if List.mem ~equal:String.equal except name then false
+      if is_string_in_list_option except name then false
       else (
         Unix.unlink name ;
         true )
@@ -402,7 +402,9 @@ let rec rmtree_ ?(except = []) name =
 and rm_all_in_dir_ ?except name =
   let no_files_left = ref true in
   iter_dir name ~f:(fun entry ->
-      let entry_was_deleted = rmtree_ ?except entry in
+      let entry_was_deleted =
+        if is_string_in_list_option except name then false else rmtree_ ?except entry
+      in
       no_files_left := !no_files_left && entry_was_deleted ) ;
   !no_files_left
 
@@ -428,50 +430,6 @@ let strip_balanced_once ~drop s =
     let first = String.unsafe_get s 0 in
     if Char.equal first (String.unsafe_get s (n - 1)) && drop first then String.slice s 1 (n - 1)
     else s
-
-
-let die_expected_yojson_type expected yojson_obj ~src ~example =
-  let eg = if String.equal example "" then "" else " (e.g. '" ^ example ^ "')" in
-  Die.die UserError "in %s expected json %s%s not %s" src expected eg
-    (Yojson.Basic.to_string yojson_obj)
-
-
-let assoc_of_yojson yojson_obj ~src =
-  match yojson_obj with
-  | `Assoc assoc ->
-      assoc
-  | `List [] ->
-      (* missing entries in config reported as empty list *)
-      []
-  | _ ->
-      die_expected_yojson_type "object" yojson_obj ~example:"{ \"foo\": \"bar\" }" ~src
-
-
-let string_of_yojson yojson_obj ~src =
-  match yojson_obj with
-  | `String str ->
-      str
-  | _ ->
-      die_expected_yojson_type "string" yojson_obj ~example:"\"foo\"" ~src
-
-
-let list_of_yojson yojson_obj ~src =
-  match yojson_obj with
-  | `List list ->
-      list
-  | _ ->
-      die_expected_yojson_type "list" yojson_obj ~example:"[ \"foo\", \"bar\" ]" ~src
-
-
-let string_list_of_yojson yojson_obj ~src =
-  List.map ~f:(string_of_yojson ~src) (list_of_yojson yojson_obj ~src)
-
-
-let yojson_lookup yojson_assoc elt_name ~src ~f ~default =
-  let src = src ^ " -> " ^ elt_name in
-  Option.value_map ~default
-    ~f:(fun res -> f res ~src)
-    (List.Assoc.find ~equal:String.equal yojson_assoc elt_name)
 
 
 let timeit ~f =
@@ -543,42 +501,7 @@ let inline_argument_files args =
   List.concat_map ~f:expand_arg args
 
 
-let physical_cores () =
-  with_file_in "/proc/cpuinfo" ~f:(fun ic ->
-      let physical_or_core_regxp =
-        Re.Str.regexp "\\(physical id\\|core id\\)[^0-9]+\\([0-9]+\\).*"
-      in
-      let rec loop sockets cores =
-        match In_channel.input_line ~fix_win_eol:true ic with
-        | None ->
-            let physical_cores = Int.Set.length sockets * Int.Set.length cores in
-            if physical_cores <= 0 then None else Some physical_cores
-        | Some line when Re.Str.string_match physical_or_core_regxp line 0 -> (
-            let value = Re.Str.matched_group 2 line |> int_of_string in
-            match Re.Str.matched_group 1 line with
-            | "physical id" ->
-                loop (Int.Set.add sockets value) cores
-            | "core id" ->
-                loop sockets (Int.Set.add cores value)
-            | _ ->
-                (* cannot happen thanks to the regexp *)
-                L.die InternalError "Couldn't parse line '%s' from /proc/cpuinfo." line )
-        | Some _ ->
-            loop sockets cores
-      in
-      loop Int.Set.empty Int.Set.empty )
-
-
 let cpus = Setcore.numcores ()
-
-let numcores =
-  let default = cpus / 2 in
-  match Version.build_platform with
-  | Darwin | Windows ->
-      default
-  | Linux ->
-      physical_cores () |> Option.value ~default
-
 
 let zip_fold ~init ~f ~zip_filename =
   let file_in = Zip.open_in zip_filename in

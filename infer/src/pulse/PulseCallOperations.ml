@@ -6,13 +6,12 @@
  *)
 
 open! IStd
+module F = Format
 module L = Logging
 module IRAttributes = Attributes
 open PulseBasicInterface
 open PulseDomainInterface
 open PulseOperationResult.Import
-
-type t = AbductiveDomain.t
 
 let is_ptr_to_const formal_typ_opt = Option.exists formal_typ_opt ~f:Typ.is_ptr_to_const
 
@@ -53,11 +52,39 @@ let is_const_version_available tenv pname =
                 List.exists ~f:(is_const_version pname_method) methods ) )
 
 
+let matches_iter =
+  QualifiedCppName.Match.of_fuzzy_qual_names
+    [ "std::__detail::_Node_iterator"
+    ; "std::__wrap_iter"
+    ; "std::_Rb_tree_iterator"
+    ; "__gnu_cxx::__normal_iterator" ]
+
+
+module GlobalForStats = struct
+  type t = {node_is_not_stuck: bool; one_call_is_stuck: bool}
+
+  let empty = {node_is_not_stuck= false; one_call_is_stuck= false}
+
+  let global = ref empty
+
+  let () = AnalysisGlobalState.register_ref ~init:(fun () -> empty) global
+
+  let init_before_call () = global := {!global with node_is_not_stuck= false}
+
+  let is_node_not_stuck () = !global.node_is_not_stuck
+
+  let node_is_not_stuck () = global := {!global with node_is_not_stuck= true}
+
+  let is_one_call_stuck () = !global.one_call_is_stuck
+
+  let one_call_is_stuck () = global := {!global with one_call_is_stuck= true}
+end
+
 let unknown_call tenv ({PathContext.timestamp} as path) call_loc (reason : CallEvent.t)
     callee_pname_opt ~ret ~actuals ~formals_opt astate0 =
   let hist =
-    ValueHistory.singleton
-      (Call {f= reason; location= call_loc; in_call= ValueHistory.epoch; timestamp})
+    let actuals_hists = List.map actuals ~f:(fun ((_, hist), _) -> hist) in
+    ValueHistory.unknown_call reason actuals_hists call_loc timestamp
   in
   let ret_val = AbstractValue.mk_fresh () in
   (* record the [ReturnedFromUnknown] attribute from ret_v -> actuals for checking for modifications to copies *)
@@ -68,14 +95,9 @@ let unknown_call tenv ({PathContext.timestamp} as path) call_loc (reason : CallE
      same value for the same inputs *)
   let is_functional = ref true in
   let should_havoc actual_typ formal_typ_opt =
-    let matches_iter =
-      QualifiedCppName.Match.of_fuzzy_qual_names
-        [ "std::__detail::_Node_iterator"
-        ; "std::__wrap_iter"
-        ; "std::_Rb_tree_iterator"
-        ; "__gnu_cxx::__normal_iterator" ]
-    in
     match actual_typ.Typ.desc with
+    | _ when not Config.pulse_havoc_arguments ->
+        `DoNotHavoc
     | _ when Language.curr_language_is Erlang ->
         `DoNotHavoc
     | Tstruct (CppClass {name})
@@ -206,8 +228,9 @@ let unknown_call tenv ({PathContext.timestamp} as path) call_loc (reason : CallE
   |> add_skipped_proc
 
 
-let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee_pname call_loc
-    callee_exec_state ~ret ~captured_formals ~captured_actuals ~formals ~actuals astate =
+let apply_callee ({InterproceduralAnalysis.tenv; proc_desc} as analysis_data)
+    ({PathContext.timestamp} as path) callee_proc_name call_loc callee_exec_state ~ret
+    ~captured_formals ~captured_actuals ~formals ~actuals ?call_flags astate =
   let open ExecutionDomain in
   let copy_to_caller_return_variable astate return_val_opt =
     (* Copies the return value of the callee into the return register of the caller.
@@ -216,12 +239,14 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
         we simply return the original abstract state unchanged. *)
     match return_val_opt with
     | Some return_val_hist ->
-        let caller_return_var : Pvar.t = Procdesc.get_ret_var caller_proc_desc in
+        let caller_return_var : Pvar.t = Procdesc.get_ret_var proc_desc in
         let (astate, caller_return_val_hist) : AbductiveDomain.t * (AbstractValue.t * ValueHistory.t)
             =
           PulseOperations.eval_var path call_loc caller_return_var astate
         in
         let+ (astate : AbductiveDomain.t) =
+          L.d_printfln "called copy to caller return ref=%a, obj=%a" AbstractValue.pp
+            (fst caller_return_val_hist) AbstractValue.pp (fst return_val_hist) ;
           PulseOperations.write_deref path call_loc ~ref:caller_return_val_hist ~obj:return_val_hist
             astate
         in
@@ -230,10 +255,41 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
         Ok (ExceptionRaised astate)
   in
   let map_call_result callee_summary ~f =
+    (* Clean up the summary before application to improve taint traces. When the calee is a taint
+         sink itself with kinds K, we remove all MustNotBeTainted attributes matching K. The reason is
+         if the callee itself calls other functions that are taint sinks with kind in K, the trace
+         will keep going from callee to callee as long as the tainted value flows through the call
+         chain. This leads to very long and confusing traces.
+
+       TODO(arr): ideally, we'd scrub the summary of the callee once when we create a summary in
+       AbductiveDomain rather than on every application. Unfortunately, as is this creates a
+       dependency cycle between modules and should be dealt with separately. *)
+    let callee_summary =
+      if Config.pulse_taint_short_traces then
+        let kinds =
+          PulseTaintItemMatcher.procedure_matching_kinds tenv callee_proc_name None
+            TaintConfig.sink_procedure_matchers
+        in
+        let calee_summary =
+          AbductiveDomain.Summary.remove_all_must_not_be_tainted ~kinds callee_summary
+        in
+        calee_summary
+      else callee_summary
+    in
+    (* In order to apply summary specialisation, we call blocks or function pointers with the closure as the first argument,
+       but when we want to call the actual code of the block or function, we need to remove the closure argument again. *)
+    let actuals =
+      match call_flags with
+      | Some call_flags
+        when call_flags.CallFlags.cf_is_objc_block || call_flags.CallFlags.cf_is_c_function_ptr -> (
+        match actuals with _ :: rest -> rest | [] -> [] )
+      | _ ->
+          actuals
+    in
     let sat_unsat, contradiction =
-      PulseInterproc.apply_summary path callee_pname call_loc ~callee_summary ~captured_formals
-        ~captured_actuals ~formals
-        ~actuals:(trim_actuals_if_var_arg (Some callee_pname) ~actuals ~formals)
+      PulseInterproc.apply_summary analysis_data path ~callee_proc_name call_loc ~callee_summary
+        ~captured_formals ~captured_actuals ~formals
+        ~actuals:(trim_actuals_if_var_arg (Some callee_proc_name) ~actuals ~formals)
         astate
     in
     let sat_unsat =
@@ -246,7 +302,7 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
             PulseOperations.havoc_id (fst ret)
               (ValueHistory.singleton
                  (Call
-                    { f= Call callee_pname
+                    { f= Call callee_proc_name
                     ; location= call_loc
                     ; in_call= ValueHistory.epoch
                     ; timestamp } ) )
@@ -269,13 +325,14 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
   | AbortProgram astate
   | ExitProgram astate
   | LatentAbortProgram {astate}
+  | LatentSpecializedTypeIssue {astate}
   | LatentInvalidAccess {astate} ->
       map_call_result astate ~f:(fun _return_val_opt (subst, hist_map) astate_post_call ->
           let** astate_summary =
             let open SatUnsat.Import in
-            AbductiveDomain.Summary.of_post tenv
-              (Procdesc.get_proc_name caller_proc_desc)
-              (Procdesc.get_attributes caller_proc_desc)
+            AbductiveDomain.Summary.of_post
+              (Procdesc.get_proc_name proc_desc)
+              (Procdesc.get_attributes proc_desc)
               call_loc astate_post_call
             >>| AccessResult.ignore_leaks >>| AccessResult.of_abductive_summary_result
             >>| AccessResult.with_summary
@@ -291,7 +348,7 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
           | LatentAbortProgram {latent_issue} -> (
               let open SatUnsat.Import in
               let latent_issue =
-                LatentIssue.add_call (Call callee_pname, call_loc) (subst, hist_map)
+                LatentIssue.add_call (Call callee_proc_name, call_loc) (subst, hist_map)
                   astate_post_call latent_issue
               in
               let diagnostic = LatentIssue.to_diagnostic latent_issue in
@@ -309,6 +366,17 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
                        ~f:(fun _ ->
                          L.die InternalError
                            "LatentAbortProgram cannot be applied to non-fatal errors" ) ) )
+          | LatentSpecializedTypeIssue {specialized_type; trace} ->
+              let trace =
+                Trace.ViaCall
+                  { f= Call callee_proc_name
+                  ; location= call_loc
+                  ; history= ValueHistory.epoch
+                  ; in_call= trace }
+              in
+              (* The decision to report or further propagate the issue is done
+                 at summary creation time based on the current specialization *)
+              Sat (Ok (LatentSpecializedTypeIssue {astate= astate_summary; specialized_type; trace}))
           | LatentInvalidAccess
               { address= address_callee
               ; must_be_valid= callee_access_trace, must_be_valid_reason
@@ -326,10 +394,12 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
                 Unsat
             | Some (invalid_address, default_caller_history) -> (
                 let access_trace =
-                  Trace.add_call (Call callee_pname) call_loc hist_map ~default_caller_history
+                  Trace.add_call (Call callee_proc_name) call_loc hist_map ~default_caller_history
                     callee_access_trace
                 in
-                let calling_context = (CallEvent.Call callee_pname, call_loc) :: calling_context in
+                let calling_context =
+                  (CallEvent.Call callee_proc_name, call_loc) :: calling_context
+                in
                 match
                   AbductiveDomain.find_post_cell_opt invalid_address astate_post_call
                   |> Option.bind ~f:(fun (_, attrs) -> Attributes.get_invalid attrs)
@@ -371,33 +441,21 @@ let apply_callee tenv ({PathContext.timestamp} as path) ~caller_proc_desc callee
                          , [] ) ) ) ) )
 
 
-let ( let<**> ) x f =
-  match x with
-  | Unsat ->
-      ([], None)
-  | Sat (FatalError _ as err) ->
-      ([err], None)
-  | Sat (Ok y) ->
-      f y
-  | Sat (Recoverable (y, errors)) ->
-      let res, contradiction = f y in
-      let res = List.map res ~f:(fun result -> PulseResult.append_errors errors result) in
-      (res, contradiction)
-
-
-let call_aux tenv path caller_proc_desc call_loc callee_pname ret actuals call_kind
-    (callee_proc_attrs : ProcAttributes.t) exec_states (astate : AbductiveDomain.t) =
+let call_aux ({InterproceduralAnalysis.tenv} as analysis_data) path call_loc callee_pname ret
+    actuals call_kind (callee_proc_attrs : ProcAttributes.t) exec_states_callee non_disj_callee
+    (astate_caller : AbductiveDomain.t) ?call_flags non_disj_caller =
   let formals =
     List.map callee_proc_attrs.formals ~f:(fun (mangled, typ, _) ->
-        (Pvar.mk mangled callee_pname |> Var.of_pvar, typ) )
+        (Pvar.mk mangled callee_pname, typ) )
   in
   let captured_formals =
     List.map callee_proc_attrs.captured ~f:(fun {CapturedVar.pvar; capture_mode; typ} ->
-        (Var.of_pvar pvar, capture_mode, typ) )
+        (pvar, capture_mode, typ) )
   in
+  let ( let<**> ) = bind_sat_result (non_disj_caller, None) in
   let<**> astate, captured_actuals =
     PulseOperations.get_captured_actuals callee_pname path call_loc ~captured_formals ~call_kind
-      ~actuals astate
+      ~actuals astate_caller
   in
   let captured_formals = List.map captured_formals ~f:(fun (var, _, typ) -> (var, typ)) in
   let should_keep_at_most_one_disjunct =
@@ -407,60 +465,77 @@ let call_aux tenv path caller_proc_desc call_loc callee_pname ret actuals call_k
   if should_keep_at_most_one_disjunct then
     L.d_printfln "Will keep at most one disjunct because %a is in block list" Procname.pp
       callee_pname ;
+  (* we propagate transitive accesses from callee to caller using *)
+  let skip_transitive_accesses = PulseTransitiveAccessChecker.should_skip_call tenv callee_pname in
+  let non_disj =
+    NonDisjDomain.apply_summary ~callee_pname ~call_loc ~skip_transitive_accesses non_disj_caller
+      non_disj_callee
+  in
   (* call {!AbductiveDomain.PrePost.apply} on each pre/post pair in the summary. *)
-  List.fold ~init:([], None) exec_states ~f:(fun (posts, contradiction) callee_exec_state ->
-      if should_keep_at_most_one_disjunct && not (List.is_empty posts) then (posts, contradiction)
-      else (
-        (* apply one pre/post spec, check for timeouts in-between each pre/post spec from the callee
-           *)
-        Timer.check_timeout () ;
-        match
-          apply_callee tenv path ~caller_proc_desc callee_pname call_loc callee_exec_state
-            ~captured_formals ~captured_actuals ~formals ~actuals ~ret astate
-        with
-        | Unsat, new_contradiction ->
-            (* couldn't apply pre/post pair *)
-            (posts, PulseInterproc.merge_contradictions contradiction new_contradiction)
-        | Sat post, new_contradiction ->
-            (post :: posts, PulseInterproc.merge_contradictions contradiction new_contradiction) ) )
+  let posts, contradiction =
+    List.fold ~init:([], None) exec_states_callee
+      ~f:(fun (posts, contradiction) callee_exec_state ->
+        if should_keep_at_most_one_disjunct && not (List.is_empty posts) then (posts, contradiction)
+        else (
+          (* apply one pre/post spec, check for timeouts in-between each pre/post spec from the callee
+              *)
+          Timer.check_timeout () ;
+          match
+            apply_callee analysis_data path callee_pname call_loc callee_exec_state
+              ~captured_formals ~captured_actuals ~formals ~actuals ~ret ?call_flags astate
+          with
+          | Unsat, new_contradiction ->
+              (* couldn't apply pre/post pair *)
+              (posts, PulseInterproc.merge_contradictions contradiction new_contradiction)
+          | Sat post, new_contradiction ->
+              (post :: posts, PulseInterproc.merge_contradictions contradiction new_contradiction) ) )
+  in
+  (posts, (non_disj, contradiction))
 
 
-let call_aux_unknown tenv path ~caller_proc_desc call_loc callee_pname ~ret ~actuals ~formals_opt
-    ~call_kind (astate : AbductiveDomain.t) =
+let call_aux_unknown ({InterproceduralAnalysis.tenv} as analysis_data) path call_loc callee_pname
+    ~ret ~actuals ~formals_opt ~call_kind (astate : AbductiveDomain.t) ?call_flags non_disj_caller =
   let arg_values = List.map actuals ~f:(fun ((value, _), _) -> value) in
+  let ( let<**> ) = bind_sat_result (non_disj_caller, None) in
   let<**> astate_unknown =
     PulseOperations.conservatively_initialize_args arg_values astate
     |> unknown_call tenv path call_loc (SkippedKnownCall callee_pname) (Some callee_pname) ~ret
          ~actuals ~formals_opt
   in
-  ScubaLogging.pulse_log_message ~label:"unmodeled_function_operation_pulse"
-    ~message:
-      (Format.asprintf "Unmodeled Function[Pulse] : %a" Procname.pp_without_templates callee_pname) ;
+  if Config.pulse_log_unknown_calls then
+    ScubaLogging.log_message_with_location ~label:"unmodeled_function_operation_pulse"
+      ~loc:(F.asprintf "%a" Location.pp_file_pos call_loc)
+      ~message:
+        (Format.asprintf "Unmodeled Function[Pulse] : %a" Procname.pp_without_templates callee_pname) ;
   if Procname.is_objc_instance_method callee_pname then
     (* a special case for objc nil messaging *)
     let unknown_objc_nil_messaging astate_unknown proc_name proc_attrs =
-      let result_unknown =
-        let<++> astate_unknown =
-          L.d_printfln "Appending positive self to state" ;
-          PulseSummary.append_objc_actual_self_positive proc_name proc_attrs (List.hd actuals)
-            astate_unknown
-        in
-        astate_unknown
+      let result_unknown, non_disj =
+        ( (let<++> astate_unknown =
+             L.d_printfln "Appending positive self to state" ;
+             PulseSummary.append_objc_actual_self_positive proc_name proc_attrs (List.hd actuals)
+               astate_unknown
+           in
+           astate_unknown )
+        , non_disj_caller )
       in
       L.d_printfln "@\nMaking and applying Objective-C nil messaging summary@\n" ;
-      let result_unknown_nil, contradiction =
+      let result_unknown_nil, (non_disj_nil, contradiction) =
         PulseSummary.mk_objc_nil_messaging_summary tenv proc_attrs
-        |> Option.value_map ~default:([], None) ~f:(fun nil_summary ->
-               call_aux tenv path caller_proc_desc call_loc callee_pname ret actuals call_kind
-                 proc_attrs [nil_summary] astate )
+        |> Option.value_map
+             ~default:([], (NonDisjDomain.bottom, None))
+             ~f:(fun nil_summary ->
+               call_aux analysis_data path call_loc callee_pname ret actuals call_kind proc_attrs
+                 [nil_summary] NonDisjDomain.Summary.bottom astate ?call_flags non_disj_caller )
       in
-      (result_unknown @ result_unknown_nil, contradiction)
+      ( result_unknown @ result_unknown_nil
+      , (NonDisjDomain.join non_disj non_disj_nil, contradiction) )
     in
     IRAttributes.load callee_pname
     |> Option.value_map
-         ~default:([Ok (ContinueProgram astate_unknown)], None)
+         ~default:([Ok (ContinueProgram astate_unknown)], (non_disj_caller, None))
          ~f:(unknown_objc_nil_messaging astate_unknown callee_pname)
-  else ([Ok (ContinueProgram astate_unknown)], None)
+  else ([Ok (ContinueProgram astate_unknown)], (non_disj_caller, None))
 
 
 let add_need_dynamic_type_specialization needs execution_states =
@@ -490,17 +565,13 @@ let add_need_dynamic_type_specialization needs execution_states =
             LatentAbortProgram {latent_abort_program with astate}
         | LatentInvalidAccess latent_invalid_access ->
             let astate = update_summary latent_invalid_access.astate in
-            LatentInvalidAccess {latent_invalid_access with astate} ) )
+            LatentInvalidAccess {latent_invalid_access with astate}
+        | LatentSpecializedTypeIssue latent_specialized_type_issue ->
+            let astate = update_summary latent_specialized_type_issue.astate in
+            LatentSpecializedTypeIssue {latent_specialized_type_issue with astate} ) )
 
 
-let maybe_dynamic_type_specialization_is_needed specialization contradiction astate =
-  let already_specialized =
-    match specialization with
-    | Some (Specialization.Pulse.DynamicTypes heap_paths) ->
-        heap_paths
-    | _ ->
-        Specialization.HeapPath.Map.empty
-  in
+let maybe_dynamic_type_specialization_is_needed already_specialized contradiction astate =
   let make_dynamic_type_specialization =
     (* we try to find a dynamic type name for each pvar in the [pvars] set in order to devirtualize all
        calls in the callee (and its own callees). If we do not find a dynamic type, we record the
@@ -516,8 +587,8 @@ let maybe_dynamic_type_specialization_is_needed specialization contradiction ast
           Option.value_map opt ~f
             ~default:(dyntypes_map, AbstractValue.Set.add addr need_specialization_from_caller)
         in
-        let** dynamic_type = AbductiveDomain.AddressAttributes.get_dynamic_type addr astate in
-        let** dynamic_type_name = Typ.name dynamic_type in
+        let** dynamic_type_data = PulseArithmetic.get_dynamic_type addr astate in
+        let** dynamic_type_name = Typ.name dynamic_type_data.Formula.typ in
         let dyntypes_map =
           if Specialization.HeapPath.Map.mem heap_path already_specialized then dyntypes_map
           else Specialization.HeapPath.Map.add heap_path dynamic_type_name dyntypes_map
@@ -541,9 +612,9 @@ let maybe_dynamic_type_specialization_is_needed specialization contradiction ast
       `UseCurrentSummary
 
 
-let call tenv path ~caller_proc_desc
-    ~(analyze_dependency : ?specialization:Specialization.t -> Procname.t -> PulseSummary.t option)
-    call_loc callee_pname ~ret ~actuals ~formals_opt ~call_kind (astate : AbductiveDomain.t) =
+let call ({InterproceduralAnalysis.proc_desc; analyze_dependency} as analysis_data) path call_loc
+    callee_pname ~ret ~actuals ~formals_opt ~call_kind (astate : AbductiveDomain.t) ?call_flags
+    non_disj_caller =
   let has_continue_program results =
     let f one_result =
       match one_result with
@@ -555,9 +626,9 @@ let call tenv path ~caller_proc_desc
     List.exists results ~f
   in
   let call_as_unknown () =
-    let results, contradiction =
-      call_aux_unknown tenv path ~caller_proc_desc call_loc callee_pname ~ret ~actuals ~formals_opt
-        ~call_kind astate
+    let results, (non_disj, contradiction) =
+      call_aux_unknown analysis_data path call_loc callee_pname ~ret ~actuals ~formals_opt
+        ~call_kind astate ?call_flags non_disj_caller
     in
     if Option.is_some contradiction then (
       L.debug Analysis Verbose
@@ -565,39 +636,37 @@ let call tenv path ~caller_proc_desc
          as unknown caused a contradiction: %a@]@;\
          @]"
         Procname.pp callee_pname ;
-      [] )
-    else results
+      ([], non_disj) )
+    else (results, non_disj)
   in
-  let call_aux exec_states =
-    let results, contradiction =
-      call_aux tenv path caller_proc_desc call_loc callee_pname ret actuals call_kind
+  let call_aux {PulseSummary.pre_post_list= exec_states; non_disj= non_disj_callee} =
+    let results, (non_disj, contradiction) =
+      call_aux analysis_data path call_loc callee_pname ret actuals call_kind
         (IRAttributes.load_exn callee_pname)
-        exec_states astate
+        exec_states non_disj_callee astate ?call_flags non_disj_caller
     in
-    (* When a function call does not have a post of type ContinueProgram, we may want to treat
-       the call as unknown to make the analysis continue. This may introduce false positives but
-       could uncover additional true positives too. *)
-    let should_try_as_unknown =
-      Config.pulse_force_continue && Option.is_none contradiction
-      && not (has_continue_program results)
-    in
-    if should_try_as_unknown then (
-      L.d_printfln_escaped ~color:Orange
-        "No disjuncts of type ContinueProgram, treating the call to %a as unknown" Procname.pp
-        callee_pname ;
-      let unknown_results = call_as_unknown () in
-      (unknown_results @ results, None) )
-    else (results, contradiction)
+    (results, non_disj, contradiction)
   in
   let rec iter_call ~max_iteration ~nth_iteration ~is_pulse_specialization_limit_not_reached
-      ?specialization already_given pre_post_list =
-    let res, contradiction = call_aux pre_post_list in
-    let needs_aliasing_specialization res contradiction =
-      List.is_empty res && Option.exists contradiction ~f:PulseInterproc.is_aliasing_contradiction
+      ?(specialization = Specialization.Pulse.bottom) already_given summary =
+    let res, non_disj, contradiction = call_aux summary in
+    let needs_aliasing_specialization =
+      match (res, contradiction) with
+      | [], Some (Aliasing _) ->
+          `AliasSpecializationImpossible
+      | [], Some (AliasingWithAllAliases aliases) ->
+          `AliasSpeciationWith aliases
+      | _, _ ->
+          `NoAliasSpecializationRequired
     in
     let request_specialization specialization =
       let specialized_summary : PulseSummary.t =
-        analyze_dependency ~specialization:(Pulse specialization) callee_pname |> Option.value_exn
+        match analyze_dependency ~specialization:(Pulse specialization) callee_pname with
+        | Ok summary ->
+            summary
+        | Error no_summary ->
+            L.die InternalError "No summary found by specialization: %a"
+              AnalysisResult.pp_no_summary no_summary
       in
       let is_limit_not_reached =
         Specialization.Pulse.is_pulse_specialization_limit_not_reached
@@ -611,87 +680,138 @@ let call tenv path ~caller_proc_desc
       | Some pre_posts ->
           (pre_posts, is_limit_not_reached)
     in
-    if needs_aliasing_specialization res contradiction then
-      if is_pulse_specialization_limit_not_reached then (
-        match
-          PulseAliasSpecialization.make_specialization callee_pname actuals call_kind path call_loc
-            astate
-        with
-        | None ->
+    let case_if_specialization_is_impossible ~f =
+      ( f res
+      , summary
+      , non_disj
+      , contradiction
+      , match needs_aliasing_specialization with
+        | `AliasSpecializationImpossible | `AliasSpeciationWith _ ->
+            `UnknownCall
+        | `NoAliasSpecializationRequired ->
+            `KnownCall )
+    in
+    if not is_pulse_specialization_limit_not_reached then
+      case_if_specialization_is_impossible ~f:Fun.id
+    else
+      let more_specialization, ask_caller_of_caller_first, needs_from_caller =
+        match needs_aliasing_specialization with
+        | `AliasSpecializationImpossible ->
             L.internal_error "Alias specialization of %a failed@;" Procname.pp callee_pname ;
-            (res, contradiction, `UnknownCall)
-        | Some alias_specialization ->
-            let specialization = Specialization.Pulse.Aliases alias_specialization in
+            (`NoMoreSpecialization, false, AbstractValue.Set.empty)
+        | `AliasSpeciationWith alias_specialization ->
+            let specialization =
+              {specialization with Specialization.Pulse.aliases= Some alias_specialization}
+            in
             L.d_printfln "requesting alias specialization %a" Specialization.Pulse.pp specialization ;
-            let pre_posts, _ = request_specialization specialization in
-            let res, contradiction = call_aux pre_posts in
-            (res, contradiction, `KnownCall) )
-      else (res, contradiction, `UnknownCall)
-    else if is_pulse_specialization_limit_not_reached then
-      L.d_with_indent ~collapsible:true "checking dynamic type specialization" ~f:(fun () ->
-          match maybe_dynamic_type_specialization_is_needed specialization contradiction astate with
-          | `NeedSpecialization (dyntypes_map, needs_from_caller) ->
-              let specialization_is_fully_satisfied =
-                AbstractValue.Set.is_empty needs_from_caller
-              in
-              if not specialization_is_fully_satisfied then
-                L.d_printfln
-                  "[specialization] not enough dyntypes information in the caller context. Missing \
-                   = %a"
-                  AbstractValue.Set.pp needs_from_caller ;
-              let has_already_be_given =
-                Specialization.Pulse.DynamicTypes.Set.mem dyntypes_map already_given
-              in
-              if has_already_be_given then
-                L.d_printfln
-                  "[specialization] we have already query the callee with specialization %a"
-                  (Specialization.HeapPath.Map.pp ~pp_value:Typ.Name.pp)
-                  dyntypes_map ;
-              if nth_iteration >= max_iteration then
-                L.d_printfln "[specialization] we have reached the maximum number of iteration" ;
-              if
-                Specialization.HeapPath.Map.is_empty dyntypes_map
-                || nth_iteration >= max_iteration || has_already_be_given
-                || (not specialization_is_fully_satisfied)
-                   && not Config.pulse_specialization_partial
-              then
-                ( add_need_dynamic_type_specialization needs_from_caller res
-                , contradiction
-                , `KnownCall )
-              else (
-                L.d_printfln "requesting specialized analysis using %sspecialization %a"
-                  (if not specialization_is_fully_satisfied then "partial " else "")
-                  (Specialization.HeapPath.Map.pp ~pp_value:Typ.Name.pp)
-                  dyntypes_map ;
-                let specialization = Specialization.Pulse.DynamicTypes dyntypes_map in
-                let specialized_pre_post_lists, is_pulse_specialization_limit_not_reached =
-                  request_specialization specialization
-                in
-                let already_given =
-                  Specialization.Pulse.DynamicTypes.Set.add dyntypes_map already_given
-                in
-                iter_call ~max_iteration ~nth_iteration:(nth_iteration + 1)
-                  ~is_pulse_specialization_limit_not_reached ~specialization already_given
-                  specialized_pre_post_lists )
-          | `UseCurrentSummary ->
-              L.d_printfln "abort, using current summary" ;
-              (res, contradiction, `KnownCall) )
-    else (res, contradiction, `KnownCall)
+            (`MoreSpecialization specialization, false, AbstractValue.Set.empty)
+        | `NoAliasSpecializationRequired ->
+            let already_specialized = specialization.Specialization.Pulse.dynamic_types in
+            L.with_indent ~collapsible:true "checking dynamic type specialization" ~f:(fun () ->
+                match
+                  maybe_dynamic_type_specialization_is_needed already_specialized contradiction
+                    astate
+                with
+                | `NeedSpecialization (dyntypes_map, needs_from_caller) ->
+                    let specialization_is_fully_satisfied =
+                      AbstractValue.Set.is_empty needs_from_caller
+                    in
+                    if not specialization_is_fully_satisfied then
+                      L.d_printfln
+                        "[specialization] not enough dyntypes information in the caller context. \
+                         Missing = %a"
+                        AbstractValue.Set.pp needs_from_caller ;
+                    let specialization =
+                      {specialization with Specialization.Pulse.dynamic_types= dyntypes_map}
+                    in
+                    ( `MoreSpecialization specialization
+                    , (not specialization_is_fully_satisfied)
+                      && not Config.pulse_specialization_partial
+                    , needs_from_caller )
+                | `UseCurrentSummary ->
+                    L.d_printfln "abort, using current summary" ;
+                    (`NoMoreSpecialization, false, AbstractValue.Set.empty) )
+      in
+      match more_specialization with
+      | `NoMoreSpecialization ->
+          (res, summary, non_disj, contradiction, `KnownCall)
+      | `MoreSpecialization specialization
+        when Specialization.Pulse.is_empty specialization
+             && AbstractValue.Set.is_empty needs_from_caller ->
+          (res, summary, non_disj, contradiction, `KnownCall)
+      | `MoreSpecialization specialization ->
+          let has_already_be_given = Specialization.Pulse.Set.mem specialization already_given in
+          if has_already_be_given then
+            L.d_printfln "[specialization] we have already query the callee with specialization %a"
+              Specialization.Pulse.pp specialization ;
+          if nth_iteration >= max_iteration then
+            L.d_printfln "[specialization] we have reached the maximum number of iteration" ;
+          if
+            nth_iteration >= max_iteration || has_already_be_given || ask_caller_of_caller_first
+            || Specialization.Pulse.is_empty specialization
+          then
+            case_if_specialization_is_impossible
+              ~f:(add_need_dynamic_type_specialization needs_from_caller)
+          else (
+            L.d_printfln "requesting specialized analysis using %sspecialization %a"
+              (if not (AbstractValue.Set.is_empty needs_from_caller) then "partial " else "")
+              Specialization.Pulse.pp specialization ;
+            let summary, is_pulse_specialization_limit_not_reached =
+              request_specialization specialization
+            in
+            let already_given = Specialization.Pulse.Set.add specialization already_given in
+            iter_call ~max_iteration ~nth_iteration:(nth_iteration + 1)
+              ~is_pulse_specialization_limit_not_reached ~specialization already_given summary )
   in
-  match (analyze_dependency callee_pname : PulseSummary.t option) with
-  | Some summary ->
+  match analyze_dependency callee_pname with
+  | Ok summary ->
       let is_pulse_specialization_limit_not_reached =
-        Specialization.Pulse.is_pulse_specialization_limit_not_reached summary.specialized
+        Specialization.Pulse.is_pulse_specialization_limit_not_reached
+          summary.PulseSummary.specialized
       in
       let max_iteration = Config.pulse_specialization_iteration_limit in
-      let already_given = Specialization.Pulse.DynamicTypes.Set.empty in
-      iter_call ~max_iteration ~nth_iteration:0 ~is_pulse_specialization_limit_not_reached
-        already_given summary.main
-  | None ->
-      (* no spec found for some reason (unknown function, ...) *)
-      L.d_printfln_escaped "No spec found for %a@\n" Procname.pp callee_pname ;
-      let res, contradiction =
-        call_aux_unknown tenv path ~caller_proc_desc call_loc callee_pname ~ret ~actuals
-          ~formals_opt ~call_kind astate
+      let already_given = Specialization.Pulse.Set.empty in
+      let res, summary_used, non_disj, contradiction, resolution_status =
+        iter_call ~max_iteration ~nth_iteration:0 ~is_pulse_specialization_limit_not_reached
+          already_given summary.PulseSummary.main
       in
-      (res, contradiction, `UnknownCall)
+      let has_continue_program = has_continue_program res in
+      if has_continue_program then GlobalForStats.node_is_not_stuck () ;
+      let res, non_disj =
+        if
+          Config.pulse_force_continue
+          && ( PulseNonDisjunctiveDomain.Summary.has_dropped_disjuncts summary_used.non_disj
+             || List.is_empty summary_used.pre_post_list )
+          && not has_continue_program
+        then (
+          (* When a function call does not have a post of type ContinueProgram, we may want to treat
+             the call as unknown to make the analysis continue. This may introduce false positives but
+             could uncover additional true positives too. *)
+          L.d_printfln_escaped ~color:Orange
+            "No disjuncts of type ContinueProgram, treating the call to %a as unknown" Procname.pp
+            callee_pname ;
+          let unknown_results, non_disj = call_as_unknown () in
+          (unknown_results @ res, non_disj) )
+        else (res, non_disj)
+      in
+      (res, non_disj, contradiction, resolution_status)
+  | Error no_summary ->
+      (* no spec found for some reason (unknown function, ...) *)
+      L.d_printfln_escaped "No spec found for %a: %a@\n" Procname.pp callee_pname
+        AnalysisResult.pp_no_summary no_summary ;
+      let astate =
+        match no_summary with
+        | MutualRecursionCycle ->
+            let astate, cycle = AbductiveDomain.add_recursive_call call_loc callee_pname astate in
+            if Procname.equal callee_pname (Procdesc.get_proc_name proc_desc) then
+              PulseReport.report analysis_data ~is_suppressed:false ~latent:false
+                (MutualRecursionCycle {cycle; location= call_loc}) ;
+            astate
+        | AnalysisFailed | InBlockList | UnknownProcedure ->
+            astate
+      in
+      let res, (non_disj, contradiction) =
+        call_aux_unknown analysis_data path call_loc callee_pname ~ret ~actuals ~formals_opt
+          ~call_kind astate ?call_flags non_disj_caller
+      in
+      (res, non_disj, contradiction, `UnknownCall)

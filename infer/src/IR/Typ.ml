@@ -109,193 +109,65 @@ let ptr_kind_string = function
       "__autoreleasing *"
 
 
-module T = struct
-  (* Note that [is_trivially_copyable] is ignored when compare/equal-ing, since it can be
-     inconsistent for the same type depending on compilation units. *)
-  type type_quals =
-    { is_const: bool
-    ; is_reference: bool
-          (** on the source level - ignoring the additional references Infer's frontend adds *)
-    ; is_restrict: bool
-    ; is_trivially_copyable: bool [@ignore]
-    ; is_volatile: bool }
-  [@@deriving compare, equal, yojson_of, sexp, hash, normalize]
+(* Note that [is_trivially_copyable] is ignored when compare/equal-ing, since it can be
+   inconsistent for the same type depending on compilation units. *)
+type type_quals =
+  { is_const: bool
+  ; is_reference: bool
+        (** on the source level - ignoring the additional references Infer's frontend adds *)
+  ; is_restrict: bool
+  ; is_volatile: bool }
+[@@deriving compare, equal, yojson_of, sexp, hash, normalize]
 
-  (** types for sil (structured) expressions *)
-  type t = {desc: desc; quals: type_quals}
+(** types for sil (structured) expressions *)
+type t = {desc: desc; quals: type_quals}
 
-  and desc =
-    | Tint of ikind  (** integer type *)
-    | Tfloat of fkind  (** float type *)
-    | Tvoid  (** void type *)
-    | Tfun  (** function type *)
-    | Tptr of t * ptr_kind  (** pointer type *)
-    | Tstruct of name  (** structured value type name *)
-    | TVar of string  (** type variable (ie. C++ template variables) *)
-    | Tarray of {elt: t; length: IntLit.t option; stride: IntLit.t option}
-        (** array type with statically fixed length and stride *)
+and desc =
+  | Tint of ikind  (** integer type *)
+  | Tfloat of fkind  (** float type *)
+  | Tvoid  (** void type *)
+  | Tfun  (** function type *)
+  | Tptr of t * ptr_kind  (** pointer type *)
+  | Tstruct of name  (** structured value type name *)
+  | TVar of string  (** type variable (ie. C++ template variables) *)
+  | Tarray of {elt: t; length: IntLit.t option; stride: IntLit.t option}
+      (** array type with statically fixed length and stride *)
 
-  and name =
-    | CStruct of QualifiedCppName.t
-    | CUnion of QualifiedCppName.t
-    | CppClass of
-        {name: QualifiedCppName.t; template_spec_info: template_spec_info; is_union: bool [@ignore]}
-    | CSharpClass of CSharpClassName.t
-    | ErlangType of ErlangTypeName.t
-    | HackClass of HackClassName.t
-    | JavaClass of JavaClassName.t
-    | ObjcClass of QualifiedCppName.t
-    | ObjcProtocol of QualifiedCppName.t
-    | PythonClass of PythonClassName.t
-  [@@deriving hash, sexp]
+and objc_block_sig = {class_name: name option; name: string; mangled: string}
+[@@deriving compare, equal, yojson_of, sexp, hash, normalize]
 
-  and template_arg = TType of t | TInt of int64 | TNull | TNullPtr | TOpaque
+and c_function_sig =
+  {c_name: QualifiedCppName.t; c_mangled: string option; c_template_args: template_spec_info}
+[@@deriving compare, equal, yojson_of, sexp, hash, normalize]
 
-  and template_spec_info =
-    | NoTemplate
-    | Template of {mangled: string option; args: template_arg list}
-  [@@deriving compare, equal, yojson_of, hash, normalize]
+and name =
+  | CStruct of QualifiedCppName.t
+  | CUnion of QualifiedCppName.t
+  | CppClass of
+      {name: QualifiedCppName.t; template_spec_info: template_spec_info; is_union: bool [@ignore]}
+  | CSharpClass of CSharpClassName.t
+  | ErlangType of ErlangTypeName.t
+  | HackClass of HackClassName.t
+  | JavaClass of JavaClassName.t
+  | ObjcClass of QualifiedCppName.t
+  | ObjcProtocol of QualifiedCppName.t
+  | PythonClass of PythonClassName.t
+  | ObjcBlock of objc_block_sig
+  | CFunction of c_function_sig
+[@@deriving hash, sexp]
 
-  let yojson_of_name = [%yojson_of: _]
+and template_arg = TType of t | TInt of int64 | TNull | TNullPtr | TOpaque
 
-  let rec equal_ignore_quals t1 t2 = equal_desc_ignore_quals t1.desc t2.desc
+and template_spec_info = NoTemplate | Template of {mangled: string option; args: template_arg list}
+[@@deriving compare, equal, yojson_of, hash, normalize]
 
-  and equal_desc_ignore_quals d1 d2 =
-    match (d1, d2) with
-    | Tint ikind1, Tint ikind2 ->
-        equal_ikind ikind1 ikind2
-    | Tfloat fkind1, Tfloat fkind2 ->
-        equal_fkind fkind1 fkind2
-    | Tvoid, Tvoid | Tfun, Tfun ->
-        true
-    | Tptr (t1, ptr_kind1), Tptr (t2, ptr_kind2) ->
-        equal_ptr_kind ptr_kind1 ptr_kind2 && equal_ignore_quals t1 t2
-    | Tstruct name1, Tstruct name2 ->
-        equal_name name1 name2
-    | TVar s1, TVar s2 ->
-        String.equal s1 s2
-    | Tarray {elt= t1}, Tarray {elt= t2} ->
-        equal_ignore_quals t1 t2
-    | _, _ ->
-        false
-
-
-  let rec strict_compatible_match formal actual =
-    (* Check if formal binds actual, excluding the case where const T& binds const T&&, T&& *)
-    match (formal.desc, actual.desc) with
-    (* T&& binds T&&
-       const T&& binds const T&& and T&& *)
-    | Tptr (t1, Pk_rvalue_reference), Tptr (t2, Pk_rvalue_reference) ->
-        ((not t2.quals.is_const) || t1.quals.is_const) && strict_compatible_match t1 t2
-    (* Any non-reference type T binds T&& *)
-    | t1, Tptr (t2, Pk_rvalue_reference) ->
-        equal_desc_ignore_quals t1 t2.desc
-    (* T&& does not bind any l-value references *)
-    | Tptr (_, Pk_rvalue_reference), Tptr (_, Pk_lvalue_reference) ->
-        false
-    (* T& binds T&
-       const T& binds const T&, T&. *)
-    | Tptr (t1, Pk_lvalue_reference), Tptr (t2, Pk_lvalue_reference) ->
-        ((not t2.quals.is_const) || t1.quals.is_const) && strict_compatible_match t1 t2
-    (* Any non-reference type T binds T& *)
-    | t1, Tptr (t2, Pk_lvalue_reference) ->
-        equal_desc_ignore_quals t1 t2.desc
-    | Tptr (t1, ptr_kind1), Tptr (t2, ptr_kind2) ->
-        equal_ptr_kind ptr_kind1 ptr_kind2 && strict_compatible_match t1 t2
-    | Tint ikind1, Tint ikind2 ->
-        equal_ikind ikind1 ikind2
-    | Tfloat fkind1, Tfloat fkind2 ->
-        equal_fkind fkind1 fkind2
-    | Tvoid, Tvoid | Tfun, Tfun ->
-        true
-    | Tstruct name1, Tstruct name2 ->
-        equal_name name1 name2
-    | TVar s1, TVar s2 ->
-        String.equal s1 s2
-    | Tarray {elt= t1}, Tarray {elt= t2} ->
-        equal_ignore_quals t1 t2
-    | _, _ ->
-        false
-
-
-  let compatible_match formal actual =
-    (* Check if formal binds actual, including the case where const T& binds const T&&, T&&. *)
-    match (formal.desc, actual.desc) with
-    (* const T& binds const T&&, T&&. *)
-    | Tptr (t1, Pk_lvalue_reference), Tptr (t2, Pk_rvalue_reference) ->
-        t1.quals.is_const && strict_compatible_match t1 t2
-    | _ ->
-        strict_compatible_match formal actual
-
-
-  let overloading_resolution = [strict_compatible_match; compatible_match]
-  (* [overloading_resolution] is a list of predicates that compare whether a type T1 binds a type T2.
-      It is ordered by priority, from the highest to the lowest one. The current implementation prioritise
-      const T&& / T&& in binding a type const T&&/T&&, as done in the standard (13.3.3.2.3) *)
-end
-
-include T
-
-let mk_type_quals ?default ?is_const ?is_reference ?is_restrict ?is_trivially_copyable ?is_volatile
-    () =
-  let default_ =
-    { is_const= false
-    ; is_reference= false
-    ; is_restrict= false
-    ; is_trivially_copyable= false
-    ; is_volatile= false }
-  in
-  let mk_aux ?(default = default_) ?(is_const = default.is_const)
-      ?(is_reference = default.is_reference) ?(is_restrict = default.is_restrict)
-      ?(is_trivially_copyable = default.is_trivially_copyable) ?(is_volatile = default.is_volatile)
-      () =
-    {is_const; is_reference; is_restrict; is_trivially_copyable; is_volatile}
-  in
-  mk_aux ?default ?is_const ?is_reference ?is_restrict ?is_trivially_copyable ?is_volatile ()
-
+let yojson_of_name = [%yojson_of: _]
 
 let is_const {is_const} = is_const
 
-let is_reference_on_source {is_reference} = is_reference
-
 let is_restrict {is_restrict} = is_restrict
 
-let is_trivially_copyable {is_trivially_copyable} = is_trivially_copyable
-
 let is_volatile {is_volatile} = is_volatile
-
-let is_weak_pointer t = match t.desc with Tptr (_, Pk_objc_weak) -> true | _ -> false
-
-let is_strong_pointer t = match t.desc with Tptr (_, Pk_pointer) -> true | _ -> false
-
-let mk ?default ?quals desc : t =
-  let default_ = {desc; quals= mk_type_quals ()} in
-  let mk_aux ?(default = default_) ?(quals = default.quals) desc = {desc; quals} in
-  mk_aux ?default ?quals desc
-
-
-let set_ptr_to_const ({desc} as typ) =
-  match desc with
-  | Tptr (t, ptr_kind) ->
-      {typ with desc= Tptr ({t with quals= {t.quals with is_const= true}}, ptr_kind)}
-  | _ ->
-      typ
-
-
-let set_to_const ({quals} as typ) = {typ with quals= {quals with is_const= true}}
-
-let mk_array ?default ?quals ?length ?stride elt : t =
-  mk ?default ?quals (Tarray {elt; length; stride})
-
-
-let mk_struct name = mk (Tstruct name)
-
-let mk_ptr ?(ptr_kind = Pk_pointer) t = mk (Tptr (t, ptr_kind))
-
-let get_ikind_opt {desc} = match desc with Tint ikind -> Some ikind | _ -> None
-
-(* TODO: size_t should be implementation-dependent. *)
-let size_t = IULong
 
 let escape pe = if Pp.equal_print_kind pe.Pp.kind Pp.HTML then Escape.escape_xml else Fn.id
 
@@ -349,6 +221,10 @@ and pp_name_c_syntax pe f = function
       CSharpClassName.pp f name
   | PythonClass name ->
       PythonClassName.pp f name
+  | ObjcBlock bsig ->
+      F.fprintf f "%s" bsig.name
+  | CFunction csig ->
+      F.fprintf f "%a" QualifiedCppName.pp csig.c_name
 
 
 and pp_template_spec_info pe f = function
@@ -373,6 +249,143 @@ and pp_template_spec_info pe f = function
 (** Pretty print a type. Do nothing by default. *)
 let pp pe f te = if Config.print_types then pp_full pe f te
 
+let make_cpp_class_matcher ?(non_ptr = true) ?(ptr = true) ?prefix fuzzy_qual_names =
+  let matcher = QualifiedCppName.Match.of_fuzzy_qual_names ?prefix fuzzy_qual_names in
+  function
+  | {desc= Tstruct (CppClass {name})} when non_ptr ->
+      QualifiedCppName.Match.match_qualifiers matcher name
+  | {desc= Tptr ({desc= Tstruct (CppClass {name})}, _)} when ptr ->
+      QualifiedCppName.Match.match_qualifiers matcher name
+  | _ ->
+      false
+
+
+let is_std_function = make_cpp_class_matcher ~ptr:false ["std::function"]
+
+let is_cpp_lambda = make_cpp_class_matcher ~ptr:false ~prefix:true ["lambda_"]
+
+let rec equal_ignore_quals t1 t2 = equal_desc_ignore_quals t1.desc t2.desc
+
+and equal_desc_ignore_quals d1 d2 =
+  match (d1, d2) with
+  | Tint ikind1, Tint ikind2 ->
+      equal_ikind ikind1 ikind2
+  | Tfloat fkind1, Tfloat fkind2 ->
+      equal_fkind fkind1 fkind2
+  | Tvoid, Tvoid | Tfun, Tfun ->
+      true
+  | Tptr (t1, ptr_kind1), Tptr (t2, ptr_kind2) ->
+      equal_ptr_kind ptr_kind1 ptr_kind2 && equal_ignore_quals t1 t2
+  | Tstruct name1, Tstruct name2 ->
+      equal_name name1 name2
+  | TVar s1, TVar s2 ->
+      String.equal s1 s2
+  | Tarray {elt= t1}, Tarray {elt= t2} ->
+      equal_ignore_quals t1 t2
+  | _, _ ->
+      false
+
+
+let rec strict_compatible_match formal actual =
+  (* Check if formal binds actual, excluding the case where const T& binds const T&&, T&& *)
+  match (formal.desc, actual.desc) with
+  (* T&& binds T&&
+     const T&& binds const T&& and T&& *)
+  | Tptr (t1, Pk_rvalue_reference), Tptr (t2, Pk_rvalue_reference) ->
+      ((not t2.quals.is_const) || t1.quals.is_const) && strict_compatible_match t1 t2
+  (* T& binds T& and T&&
+     const T& binds const T&, T&. *)
+  | Tptr (t1, Pk_lvalue_reference), Tptr (t2, (Pk_lvalue_reference | Pk_rvalue_reference)) ->
+      ((not t2.quals.is_const) || t1.quals.is_const) && strict_compatible_match t1 t2
+  (* Any non-reference type T binds T&& *)
+  | t1, Tptr (t2, Pk_rvalue_reference) ->
+      equal_desc_ignore_quals t1 t2.desc
+  (* T&& does not bind any l-value references *)
+  | Tptr (_, Pk_rvalue_reference), Tptr (_, Pk_lvalue_reference) ->
+      false
+  (* Any non-reference type T binds T& *)
+  | t1, Tptr (t2, Pk_lvalue_reference) ->
+      equal_desc_ignore_quals t1 t2.desc
+  | Tptr (t1, ptr_kind1), Tptr (t2, ptr_kind2) ->
+      equal_ptr_kind ptr_kind1 ptr_kind2 && strict_compatible_match t1 t2
+  | Tint ikind1, Tint ikind2 ->
+      equal_ikind ikind1 ikind2
+  | Tfloat fkind1, Tfloat fkind2 ->
+      equal_fkind fkind1 fkind2
+  | Tvoid, Tvoid | Tfun, Tfun ->
+      true
+  | Tstruct name1, Tstruct name2 ->
+      equal_name name1 name2 || (is_std_function formal && is_cpp_lambda actual)
+  | TVar s1, TVar s2 ->
+      String.equal s1 s2
+  | Tarray {elt= t1}, Tarray {elt= t2} ->
+      equal_ignore_quals t1 t2
+  | _, _ ->
+      false
+
+
+let compatible_match formal actual =
+  (* Check if formal binds actual, including the case where const T& binds const T&&, T&&. *)
+  match (formal.desc, actual.desc) with
+  (* const T& binds const T&&, T&&. *)
+  | Tptr (t1, Pk_lvalue_reference), Tptr (t2, Pk_rvalue_reference) ->
+      t1.quals.is_const && strict_compatible_match t1 t2
+  | _ ->
+      strict_compatible_match formal actual
+
+
+let overloading_resolution = [strict_compatible_match; compatible_match]
+(* [overloading_resolution] is a list of predicates that compare whether a type T1 binds a type T2.
+    It is ordered by priority, from the highest to the lowest one. The current implementation prioritise
+    const T&& / T&& in binding a type const T&&/T&&, as done in the standard (13.3.3.2.3) *)
+
+let mk_type_quals ?default ?is_const ?is_reference ?is_restrict ?is_volatile () =
+  let default_ = {is_const= false; is_reference= false; is_restrict= false; is_volatile= false} in
+  let mk_aux ?(default = default_) ?(is_const = default.is_const)
+      ?(is_reference = default.is_reference) ?(is_restrict = default.is_restrict)
+      ?(is_volatile = default.is_volatile) () =
+    {is_const; is_reference; is_restrict; is_volatile}
+  in
+  mk_aux ?default ?is_const ?is_reference ?is_restrict ?is_volatile ()
+
+
+let is_reference_on_source {is_reference} = is_reference
+
+let is_weak_pointer t =
+  match t.desc with Tptr (_, (Pk_objc_weak | Pk_objc_unsafe_unretained)) -> true | _ -> false
+
+
+let is_strong_pointer t = match t.desc with Tptr (_, Pk_pointer) -> true | _ -> false
+
+let mk ?default ?quals desc : t =
+  let default_ = {desc; quals= mk_type_quals ()} in
+  let mk_aux ?(default = default_) ?(quals = default.quals) desc = {desc; quals} in
+  mk_aux ?default ?quals desc
+
+
+let set_ptr_to_const ({desc} as typ) =
+  match desc with
+  | Tptr (t, ptr_kind) ->
+      {typ with desc= Tptr ({t with quals= {t.quals with is_const= true}}, ptr_kind)}
+  | _ ->
+      typ
+
+
+let set_to_const ({quals} as typ) = {typ with quals= {quals with is_const= true}}
+
+let mk_array ?default ?quals ?length ?stride elt : t =
+  mk ?default ?quals (Tarray {elt; length; stride})
+
+
+let mk_struct name = mk (Tstruct name)
+
+let mk_ptr ?(ptr_kind = Pk_pointer) t = mk (Tptr (t, ptr_kind))
+
+let get_ikind_opt {desc} = match desc with Tint ikind -> Some ikind | _ -> None
+
+(* TODO: size_t should be implementation-dependent. *)
+let size_t = IULong
+
 let to_string typ =
   let pp fmt = pp_full Pp.text fmt typ in
   F.asprintf "%t" pp
@@ -391,7 +404,7 @@ let is_template_spec_info_empty = function
 
 
 module Name = struct
-  type t = name [@@deriving compare, equal, yojson_of, sexp, hash]
+  type t = name [@@deriving compare, equal, yojson_of, sexp, hash, normalize]
 
   let compare_name x y =
     match (x, y) with
@@ -440,6 +453,18 @@ module Name = struct
         -1
     | _, PythonClass _ ->
         1
+    | ObjcBlock bsig1, ObjcBlock bsig2 ->
+        compare_objc_block_sig bsig1 bsig2
+    | ObjcBlock _, _ ->
+        -1
+    | _, ObjcBlock _ ->
+        1
+    | CFunction csig1, CFunction csig2 ->
+        compare_c_function_sig csig1 csig2
+    | CFunction _, _ ->
+        -1
+    | _, CFunction _ ->
+        1
 
 
   let qual_name = function
@@ -448,7 +473,13 @@ module Name = struct
     | CppClass {name; template_spec_info} ->
         let template_suffix = F.asprintf "%a" (pp_template_spec_info Pp.text) template_spec_info in
         QualifiedCppName.append_template_args_to_last name ~args:template_suffix
-    | JavaClass _ | CSharpClass _ | ErlangType _ | HackClass _ | PythonClass _ ->
+    | JavaClass _
+    | CSharpClass _
+    | ErlangType _
+    | HackClass _
+    | PythonClass _
+    | ObjcBlock _
+    | CFunction _ ->
         QualifiedCppName.empty
 
 
@@ -457,7 +488,13 @@ module Name = struct
         name
     | CppClass {name} ->
         name
-    | JavaClass _ | CSharpClass _ | ErlangType _ | HackClass _ | PythonClass _ ->
+    | JavaClass _
+    | CSharpClass _
+    | ErlangType _
+    | HackClass _
+    | PythonClass _
+    | ObjcBlock _
+    | CFunction _ ->
         QualifiedCppName.empty
 
 
@@ -484,6 +521,10 @@ module Name = struct
         HackClassName.to_string name
     | PythonClass name ->
         PythonClassName.to_string name
+    | ObjcBlock bsig ->
+        bsig.name
+    | CFunction csig ->
+        QualifiedCppName.to_qual_string csig.c_name
 
 
   let pp fmt tname =
@@ -502,6 +543,10 @@ module Name = struct
           "python"
       | ObjcProtocol _ ->
           "protocol"
+      | ObjcBlock _ ->
+          ""
+      | CFunction _ ->
+          "function"
     in
     F.fprintf fmt "%s %a" (prefix tname) (pp_name_c_syntax Pp.text) tname
 
@@ -511,13 +556,21 @@ module Name = struct
   let is_class = function
     | CppClass _ | JavaClass _ | HackClass _ | ObjcClass _ | CSharpClass _ | PythonClass _ ->
         true
-    | CStruct _ | CUnion _ | ErlangType _ | ObjcProtocol _ ->
+    | CStruct _ | CUnion _ | ErlangType _ | ObjcProtocol _ | ObjcBlock _ | CFunction _ ->
         false
 
 
   let is_union = function CUnion _ -> true | _ -> false
 
   let is_objc_protocol name = match name with ObjcProtocol _ -> true | _ -> false
+
+  let is_objc_class name = match name with ObjcClass _ -> true | _ -> false
+
+  let is_objc_block name = match name with ObjcBlock _ -> true | _ -> false
+
+  let is_hack_class name = match name with HackClass _ -> true | _ -> false
+
+  let is_python_class name = match name with PythonClass _ -> true | _ -> false
 
   let is_same_type t1 t2 =
     match (t1, t2) with
@@ -535,7 +588,11 @@ module Name = struct
 
 
   module C = struct
-    let from_qual_name qual_name = CStruct qual_name
+    let from_qual_name qual_name =
+      if Config.struct_as_cpp_class then
+        CppClass {name= qual_name; template_spec_info= NoTemplate; is_union= false}
+      else CStruct qual_name
+
 
     let from_string name_str = QualifiedCppName.of_qual_string name_str |> from_qual_name
 
@@ -606,11 +663,6 @@ module Name = struct
           L.die InternalError "Tried to split a non-java class name into a java split type@."
 
 
-    let is_anonymous_inner_class_name_exn class_name =
-      let java_class_name = get_java_class_name_exn class_name in
-      JavaClassName.is_anonymous_inner_class_name java_class_name
-
-
     let is_anonymous_inner_class_name_opt class_name =
       get_java_class_name_opt class_name
       |> Option.map ~f:JavaClassName.is_anonymous_inner_class_name
@@ -637,8 +689,6 @@ module Name = struct
     let protocol_from_qual_name qual_name = ObjcProtocol qual_name
 
     let is_class = function ObjcClass _ -> true | _ -> false
-
-    let remodel_class = Option.map Config.remodel_class ~f:from_string
   end
 
   module Set = PrettyPrintable.MakePPSet (struct
@@ -658,16 +708,6 @@ module Name = struct
 
     let hash = hash
   end)
-
-  module Normalizer = struct
-    type t = name
-
-    let normalize = hash_normalize_name
-
-    let normalize_opt = hash_normalize_name_opt
-
-    let normalize_list = hash_normalize_name_list
-  end
 end
 
 (** dump a type with all the details. *)
@@ -739,37 +779,17 @@ let shared_pointer_qual_names =
   ["std::shared_ptr"; "std::__shared_ptr"; "std::__shared_ptr_access"; "boost::intrusive_ptr"]
 
 
-let is_pointer_to_smart_pointer =
-  let matcher =
-    QualifiedCppName.Match.of_fuzzy_qual_names ("std::unique_ptr" :: shared_pointer_qual_names)
-  in
-  fun typ ->
-    match typ.desc with
-    | Tptr ({desc= Tstruct (CppClass {name})}, _) ->
-        QualifiedCppName.Match.match_qualifiers matcher name
-    | _ ->
-        false
-
-
-let is_pointer_to_unique_pointer =
-  let matcher = QualifiedCppName.Match.of_fuzzy_qual_names ["std::unique_ptr"] in
-  fun typ ->
-    match typ.desc with
-    | Tptr ({desc= Tstruct (CppClass {name})}, _) ->
-        QualifiedCppName.Match.match_qualifiers matcher name
-    | _ ->
-        false
-
-
 let shared_pointer_matcher = QualifiedCppName.Match.of_fuzzy_qual_names shared_pointer_qual_names
 
-let is_shared_pointer typ =
-  match typ.desc with
-  | Tstruct (CppClass {name}) ->
-      QualifiedCppName.Match.match_qualifiers shared_pointer_matcher name
-  | _ ->
-      false
+let is_pointer_to_smart_pointer =
+  make_cpp_class_matcher ~non_ptr:false ("std::unique_ptr" :: shared_pointer_qual_names)
 
+
+let is_pointer_to_unique_pointer = make_cpp_class_matcher ~non_ptr:false ["std::unique_ptr"]
+
+let is_shared_pointer = make_cpp_class_matcher ~ptr:false shared_pointer_qual_names
+
+let is_folly_coro = make_cpp_class_matcher ~prefix:true ["folly::coro"]
 
 let is_void typ = match typ.desc with Tvoid -> true | _ -> false
 
@@ -915,14 +935,3 @@ let rec is_java_type t =
       is_java_type elt
   | _ ->
       false
-
-
-module Normalizer = struct
-  type nonrec t = t
-
-  let normalize = hash_normalize
-
-  let normalize_opt = hash_normalize_opt
-
-  let normalize_list = hash_normalize_list
-end

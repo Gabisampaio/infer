@@ -589,8 +589,7 @@ let rec dotty_mk_set_links dotnodes sigma p f cycle =
             ~f:(fun (k, lab_src, m, lab_trg) ->
               mk_link k
                 (mk_coordinate (n + 1) lambda)
-                (strip_special_chars lab_src) (mk_coordinate m lambda) (strip_special_chars lab_trg)
-              )
+                (strip_special_chars lab_src) (mk_coordinate m lambda) (strip_special_chars lab_trg) )
             target_list
         in
         let links_from_elements = List.concat_map ~f:ff (n :: nl) in
@@ -817,13 +816,15 @@ let filter_useless_spec_dollar_box (nodes : dotty_node list) (links : link list)
   (!tmp_nodes, !tmp_links)
 
 
+let anonymous_block_prefix_regexp = lazy (Str.regexp_string Config.anonymous_block_prefix)
+
 (* print a struct node *)
 let rec print_struct f pe e te l coo c =
   let print_type =
     match te with
     | Exp.Sizeof {typ} -> (
         let str_t = Typ.to_string typ in
-        match Str.split_delim (Str.regexp_string Config.anonymous_block_prefix) str_t with
+        match Str.split_delim (Lazy.force anonymous_block_prefix_regexp) str_t with
         | [_; _] ->
             "BLOCK object"
         | _ ->

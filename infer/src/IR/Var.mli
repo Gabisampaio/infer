@@ -10,9 +10,7 @@ open! IStd
 (** Single abstraction for all the kinds of variables in SIL *)
 
 type t = private LogicalVar of Ident.t | ProgramVar of Pvar.t
-[@@deriving compare, yojson_of, sexp, hash]
-
-val equal : t -> t -> bool
+[@@deriving compare, yojson_of, sexp, hash, equal, normalize]
 
 val compare_modulo_this : t -> t -> int
 
@@ -20,7 +18,7 @@ val of_id : Ident.t -> t
 
 val of_pvar : Pvar.t -> t
 
-val of_formal_index : int -> t
+(* val of_formal_index : int -> t *)
 (** Create a variable representing the ith formal of the current procedure *)
 
 val get_all_vars_in_exp : Exp.t -> t Sequence.t
@@ -36,15 +34,13 @@ val is_pvar : t -> bool
 
 val is_global : t -> bool
 
-val is_local_to_procedure : Procname.t -> t -> bool
-
 val is_return : t -> bool
-
-val is_footprint : t -> bool
 
 val is_none : t -> bool
 
 val is_this : t -> bool
+
+val is_artificial : t -> bool
 
 val appears_in_source_code : t -> bool
 (** return true if this variable appears in source code (i.e., is not a LogicalVar or a

@@ -84,7 +84,8 @@ let initialize_environment module_ otp_modules =
           | `Ok imports ->
               imports
           | `Duplicate ->
-              L.die InternalError "repeated import: %s/%d" key.name key.arity
+              L.debug Capture Verbose "repeated import: %s/%d" key.name key.arity ;
+              imports
         in
         let imports = List.fold ~init:env.imports ~f functions in
         {env with imports}
@@ -169,7 +170,8 @@ let has_type_instr (env : (_, _) t) ~result ~value (name : ErlangTypeName.t) : S
           { typ= typ_of_name name
           ; nbytes= None
           ; dynamic_length= None
-          ; subtype= Subtype.subtypes_instof }
+          ; subtype= Subtype.subtypes_instof
+          ; nullable= false }
       , any_typ ) ]
   in
   Call ((result, Typ.mk (Tint IBool)), fun_exp, args, env.location, CallFlags.default)

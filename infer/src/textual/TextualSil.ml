@@ -113,9 +113,15 @@ let hack_bool_type_name = SilTyp.HackClass (HackClassName.make "HackBool")
 
 let hack_int_type_name = SilTyp.HackClass (HackClassName.make "HackInt")
 
+let hack_float_type_name = SilTyp.HackClass (HackClassName.make "HackFloat")
+
 let hack_string_type_name = SilTyp.HackClass (HackClassName.make "HackString")
 
+let hack_splated_vec_type_name = SilTyp.HackClass (HackClassName.make "HackSplatedVec")
+
 let hack_mixed_type_name = SilTyp.HackClass (HackClassName.make "HackMixed")
+
+let hack_awaitable_type_name = SilTyp.HackClass (HackClassName.make "HH::Awaitable")
 
 let mk_hack_mixed_type_textual loc = Typ.Struct TypeName.{value= "HackMixed"; loc}
 
@@ -443,6 +449,8 @@ module StructBridge = struct
            let kind =
              if has ~f:Textual.Attr.is_interface then SilStruct.Interface
              else if has ~f:Textual.Attr.is_trait then SilStruct.Trait
+             else if has ~f:Textual.Attr.is_abstract then SilStruct.AbstractClass
+             else if has ~f:Textual.Attr.is_alias then SilStruct.Alias
              else SilStruct.Class
            in
            SilStruct.ClassInfo.HackClassInfo kind )
@@ -453,7 +461,7 @@ module StructBridge = struct
       class. Therefore we keep [supers] as reverse to perform an efficient lookup. *)
   let rev_hack_supers lang supers = match lang with Lang.Hack -> List.rev supers | _ -> supers
 
-  let to_sil lang decls_env tenv proc_entries {name; supers; fields; attributes} =
+  let to_sil lang decls_env tenv proc_entries source_file {name; supers; fields; attributes} =
     let class_info =
       match lang with Textual.Lang.Hack -> Some (to_hack_class_info decls_env name) | _ -> None
     in
@@ -466,21 +474,22 @@ module StructBridge = struct
           | Desc proc ->
               Some proc.procdecl
           | Decl _ ->
+              (* TODO: Don't just throw Decls away entirely *)
               None )
       |> List.map ~f:(ProcDeclBridge.to_sil lang)
     in
     let fields =
       List.map fields ~f:(fun (fdecl : FieldDecl.t) ->
-          ( FieldDeclBridge.to_sil lang fdecl
-          , TypBridge.to_sil lang ~attrs:fdecl.attributes fdecl.typ
-          , Annot.Item.empty ) )
+          SilStruct.mk_field
+            (FieldDeclBridge.to_sil lang fdecl)
+            (TypBridge.to_sil lang ~attrs:fdecl.attributes fdecl.typ) )
     in
     let annots =
       List.filter_map attributes ~f:(fun attr ->
           if Attr.is_final attr then Some Annot.final else None )
     in
     (* FIXME: generate static fields *)
-    Tenv.mk_struct tenv ~fields ~annots ~supers ~methods ?class_info name |> ignore
+    Tenv.mk_struct tenv ~fields ~annots ~supers ~methods ?class_info ?source_file name |> ignore
 
 
   let of_hack_class_info class_info =
@@ -492,9 +501,9 @@ module StructBridge = struct
 
 
   let of_sil name (sil_struct : SilStruct.t) =
-    let of_sil_field (fieldname, typ, annots) =
+    let of_sil_field {SilStruct.name= fieldname; typ; annot} =
       let typ = TypBridge.of_sil typ in
-      FieldDeclBridge.of_sil fieldname typ (Annot.Item.is_final annots)
+      FieldDeclBridge.of_sil fieldname typ (Annot.Item.is_final annot)
     in
     let supers = sil_struct.supers |> List.map ~f:TypeNameBridge.of_sil in
     let fields = SilStruct.(sil_struct.fields @ sil_struct.statics) in
@@ -594,9 +603,10 @@ module ExpBridge = struct
       | Call {proc; args= [Typ typ; exp]} when ProcDecl.is_cast_builtin proc ->
           Cast (TypBridge.to_sil lang typ, aux exp)
       | Call {proc; args} -> (
-          let procsig = Exp.call_sig proc (List.length args) (TextualDecls.lang decls_env) in
+          let nb_args = List.length args in
+          let procsig = Exp.call_sig proc nb_args (TextualDecls.lang decls_env) in
           match
-            ( TextualDecls.get_procdecl decls_env procsig
+            ( TextualDecls.get_procdecl decls_env procsig nb_args
             , ProcDecl.to_unop proc
             , ProcDecl.to_binop proc
             , args )
@@ -699,7 +709,8 @@ module InstrBridge = struct
       ->
         let typ = TypBridge.to_sil lang typ in
         let sizeof =
-          SilExp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype= Subtype.exact}
+          SilExp.Sizeof
+            {typ; nbytes= None; dynamic_length= None; subtype= Subtype.exact; nullable= false}
         in
         let class_type = SilTyp.mk_ptr typ in
         let args = [(sizeof, class_type)] in
@@ -707,11 +718,21 @@ module InstrBridge = struct
         let loc = LocationBridge.to_sil sourcefile loc in
         let builtin_new = SilExp.Const (SilConst.Cfun BuiltinDecl.__new) in
         Call ((ret, class_type), builtin_new, args, loc, CallFlags.default)
-    | Let {id; exp= Call {proc; args= [target; Typ typ]}; loc}
+    | Let {id; exp= Call {proc; args= target :: Typ typ :: rest}; loc}
       when ProcDecl.is_instanceof_builtin proc ->
         let typ = TypBridge.to_sil lang typ in
+        let nullable =
+          match rest with
+          | [] ->
+              false
+          | [Const (Int n)] ->
+              Z.equal n Z.one
+          | _ ->
+              L.die InternalError "non-matching args to instanceof"
+        in
         let sizeof =
-          SilExp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype= Subtype.subtypes_instof}
+          SilExp.Sizeof
+            {typ; nbytes= None; dynamic_length= None; subtype= Subtype.subtypes_instof; nullable}
         in
         let target = ExpBridge.to_sil lang decls_env procname target in
         let args = [(target, StdTyp.void_star); (sizeof, StdTyp.void)] in
@@ -725,7 +746,8 @@ module InstrBridge = struct
         let typ = SilTyp.mk_array element_typ in
         let e = ExpBridge.to_sil lang decls_env procname exp in
         let sizeof =
-          SilExp.Sizeof {typ; nbytes= None; dynamic_length= Some e; subtype= Subtype.exact}
+          SilExp.Sizeof
+            {typ; nbytes= None; dynamic_length= Some e; subtype= Subtype.exact; nullable= false}
         in
         (* TODO(T133560394): check if we need to remove Array constructors in the type typ *)
         let class_type = SilTyp.mk_ptr typ in
@@ -739,7 +761,8 @@ module InstrBridge = struct
       ->
         let typ = TypBridge.to_sil lang typ in
         let sizeof =
-          SilExp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype= Subtype.exact}
+          SilExp.Sizeof
+            {typ; nbytes= None; dynamic_length= None; subtype= Subtype.exact; nullable= false}
         in
         let class_type = SilTyp.mk_ptr typ in
         let args = [(sizeof, class_type)] in
@@ -758,8 +781,8 @@ module InstrBridge = struct
         let ret = IdentBridge.to_sil id in
         let procsig = Exp.call_sig proc (List.length args) (TextualDecls.lang decls_env) in
         let variadic_status, ({formals_types} as callee_procdecl : ProcDecl.t) =
-          match TextualDecls.get_procdecl decls_env procsig with
-          | Some (variadic_flag, procdecl) ->
+          match TextualDecls.get_procdecl decls_env procsig (List.length args) with
+          | Some (variadic_flag, _, procdecl) ->
               (variadic_flag, procdecl)
           | None when QualifiedProcName.contains_wildcard proc ->
               let textual_ret_typ =
@@ -774,7 +797,10 @@ module InstrBridge = struct
                 ; attributes= [] } )
           | None ->
               let msg =
-                lazy (F.asprintf "the expression in %a should start with a regular call" pp i)
+                lazy
+                  (F.asprintf
+                     "no procdecl for %a the expression in %a should start with a regular call"
+                     ProcSig.pp procsig pp i )
               in
               raise (TextualTransformError [{loc; msg}])
         in
@@ -784,44 +810,47 @@ module InstrBridge = struct
             callee_procdecl.result_type.typ
         in
         let args = List.map ~f:(ExpBridge.to_sil lang decls_env procname) args in
-        let formals_types =
-          match formals_types with
-          | Some formals_types ->
-              List.map formals_types ~f:(fun ({typ} : Typ.annotated) -> TypBridge.to_sil lang typ)
-          | None -> (
-            match lang with
-            | Lang.Hack ->
-                (* Declarations with unknown formals are expected in Hack. Assume that unknown
-                   formal types are *HackMixed and their number matches that of the arguments. *)
-                List.map args ~f:(fun _ -> TypBridge.hack_mixed)
-            | Lang.Python ->
-                (* Declarations with unknown formals are expected in Python. Assume that unknown
-                   formal types are *PyObject and their number matches that of the arguments. *)
-                List.map args ~f:(fun _ -> TypBridge.python_mixed)
-            | other ->
-                L.die InternalError "Unexpected unknown formals outside of Hack/Python: %s"
-                  (Lang.to_string other) )
-        in
-        let formals_types =
-          match (variadic_status : TextualDecls.variadic_status) with
-          | NotVariadic ->
-              if TextualDecls.is_trait_method decls_env procsig then
-                List.drop_last_exn formals_types
-              else formals_types
-          | Variadic variadic_type ->
-              (* we may have too much arguments, and we then complete formal_args *)
-              (* formals_args = [t1; ...; tn; variadic_type ] *)
-              let n = List.length formals_types - 1 in
-              let variadic_type = TypBridge.to_sil lang variadic_type in
-              List.take formals_types n
-              @ List.init (List.length args - n) ~f:(fun _ -> variadic_type)
-        in
         let args =
-          match List.zip args formals_types with
-          | Ok l ->
-              l
-          | _ ->
-              L.die UserError "the call %a has been given a wrong number of arguments" pp i
+          match formals_types with
+          | None ->
+              let default_typ =
+                match lang with
+                | Lang.Hack ->
+                    (* Declarations with unknown formals are expected in Hack. Assume that unknown
+                       formal types are *HackMixed. *)
+                    TypBridge.hack_mixed
+                | Lang.Python ->
+                    (* Declarations with unknown formals are expected in Python. Assume that unknown
+                       formal types are *PyObject. *)
+                    TypBridge.python_mixed
+                | other ->
+                    L.die InternalError "Unexpected unknown formals outside of Hack/Python: %s"
+                      (Lang.to_string other)
+              in
+              List.map args ~f:(fun arg -> (arg, default_typ))
+          | Some formals_types -> (
+              let formals_types =
+                List.map formals_types ~f:(fun ({typ} : Typ.annotated) -> TypBridge.to_sil lang typ)
+              in
+              let formals_types =
+                match (variadic_status : TextualDecls.variadic_status) with
+                | NotVariadic ->
+                    if TextualDecls.is_trait_method decls_env procsig then
+                      List.drop_last_exn formals_types
+                    else formals_types
+                | Variadic variadic_type ->
+                    (* we may have too much arguments, and we then complete formal_args *)
+                    (* formals_args = [t1; ...; tn; variadic_type ] *)
+                    let n = List.length formals_types - 1 in
+                    let variadic_type = TypBridge.to_sil lang variadic_type in
+                    List.take formals_types n
+                    @ List.init (List.length args - n) ~f:(fun _ -> variadic_type)
+              in
+              match List.zip args formals_types with
+              | Ok l ->
+                  l
+              | _ ->
+                  L.die UserError "the call %a has been given a wrong number of arguments" pp i )
         in
         let loc = LocationBridge.to_sil sourcefile loc in
         let cf_virtual = Exp.equal_call_kind kind Virtual in
@@ -843,21 +872,27 @@ let instr_is_return = function Sil.Store {e1= Lvar v} -> SilPvar.is_return v | _
 module TerminatorBridge = struct
   open Terminator
 
-  let to_sil lang decls_env procname pdesc loc (t : t) : Sil.instr option =
+  let to_sil lang decls_env procname pdesc loc (t : t) : Sil.instr list =
+    let write_to_ret_var exp =
+      let ret_var = SilPvar.get_ret_pvar (ProcDeclBridge.to_sil lang procname) in
+      let ret_type = SilProcdesc.get_ret_type pdesc in
+      let e2 = ExpBridge.to_sil lang decls_env procname exp in
+      Sil.Store {e1= SilExp.Lvar ret_var; typ= ret_type; e2; loc}
+    in
     match t with
     | If _ ->
         L.die InternalError "to_sil should not be called on If terminator"
     | Ret exp ->
-        let ret_var = SilPvar.get_ret_pvar (ProcDeclBridge.to_sil lang procname) in
-        let ret_type = SilProcdesc.get_ret_type pdesc in
-        let e2 = ExpBridge.to_sil lang decls_env procname exp in
-        Some (Sil.Store {e1= SilExp.Lvar ret_var; typ= ret_type; e2; loc})
+        [write_to_ret_var exp]
+    | Throw exp ->
+        let builtin_throw = SilExp.Const (SilConst.Cfun BuiltinDecl.__hack_throw) in
+        let ret = SilIdent.create_fresh SilIdent.kprimed in
+        [ write_to_ret_var exp
+        ; Call ((ret, SilTyp.mk SilTyp.Tvoid), builtin_throw, [], loc, CallFlags.default) ]
     | Jump _ ->
-        None
-    | Throw _ ->
-        None (* TODO (T132392184) *)
+        []
     | Unreachable ->
-        None
+        []
 
 
   let of_sil decls tenv label_of_node ~opt_last succs =
@@ -875,16 +910,37 @@ module NodeBridge = struct
   open Node
 
   let to_sil lang decls_env procname pdesc node =
-    ( if not (List.is_empty node.ssa_parameters) then
-        let msg =
-          lazy (F.asprintf "node %a should not have SSA parameters" NodeName.pp node.label)
-        in
-        raise (TextualTransformError [{loc= node.label_loc; msg}]) ) ;
-    let instrs = List.map ~f:(InstrBridge.to_sil lang decls_env procname) node.instrs in
     let sourcefile = TextualDecls.source_file decls_env in
+    let load_thrown_exception =
+      match node.ssa_parameters with
+      | [] ->
+          []
+      | [(id, _typ)] ->
+          let sil_param_ident = IdentBridge.to_sil id in
+          let ret_var = SilPvar.get_ret_pvar (ProcDeclBridge.to_sil lang procname) in
+          let ret_type = SilProcdesc.get_ret_type pdesc in
+          let load_param : Sil.instr =
+            Sil.Load
+              { id= sil_param_ident
+              ; e= SilExp.Lvar ret_var
+              ; typ= ret_type
+              ; loc= LocationBridge.to_sil sourcefile node.label_loc }
+          in
+          [load_param]
+      | _ ->
+          let msg =
+            lazy
+              (F.asprintf "node %a should not have more than one SSA parameter" NodeName.pp
+                 node.label )
+          in
+          raise (TextualTransformError [{loc= node.label_loc; msg}])
+    in
+    let instrs =
+      load_thrown_exception @ List.map ~f:(InstrBridge.to_sil lang decls_env procname) node.instrs
+    in
     let last_loc = LocationBridge.to_sil sourcefile node.last_loc in
     let last = TerminatorBridge.to_sil lang decls_env procname pdesc last_loc node.last in
-    let instrs = Option.value_map ~default:instrs ~f:(fun instr -> instrs @ [instr]) last in
+    let instrs = match last with [] -> instrs | _ -> instrs @ last in
     (* Use min instr line for node's loc. This makes node placement in a debug HTML a bit more
        predictable and relevant compared to using block labels' locations which can be more detached
        from the actual source code when we're dealing with translated sources
@@ -947,10 +1003,13 @@ module ProcDescBridge = struct
   open ProcDesc
 
   let build_formals lang ({procdecl; params} as procdesc) =
-    let mk_formal ({typ} : Typ.annotated) vname =
+    let mk_formal ({typ; attributes} : Typ.annotated) vname =
       let name = Mangled.from_string vname.VarName.value in
       let typ = TypBridge.to_sil lang typ in
-      (name, typ, Annot.Item.empty)
+      let annots =
+        if List.exists ~f:Attr.is_notnull attributes then [Annot.notnull] else Annot.Item.empty
+      in
+      (name, typ, annots)
     in
     match List.map2 (ProcDesc.formals procdesc) params ~f:mk_formal with
     | Ok l ->
@@ -967,6 +1026,8 @@ module ProcDescBridge = struct
       ; modify_in_block= false
       ; is_constexpr= false
       ; is_declared_unused= false
+      ; is_structured_binding= false
+      ; has_cleanup_attribute= false
       ; tmp_id= None }
     in
     List.map locals ~f:(fun (var, annotated_typ) ->
@@ -983,6 +1044,8 @@ module ProcDescBridge = struct
     in
     let definition_loc = LocationBridge.to_sil sourcefile procdecl.qualified_name.name.loc in
     let is_hack_async = List.exists procdecl.attributes ~f:Attr.is_async in
+    let is_abstract = List.exists procdecl.attributes ~f:Attr.is_abstract in
+    let is_hack_wrapper = List.exists procdecl.attributes ~f:Attr.is_hack_wrapper in
     let hack_variadic_position =
       Option.value_map ~default:None procdecl.formals_types ~f:(fun formals_types ->
           List.findi formals_types ~f:(fun _ typ -> Typ.is_annotated typ ~f:Attr.is_variadic)
@@ -994,6 +1057,8 @@ module ProcDescBridge = struct
       { (ProcAttributes.default (SourceFile.file sourcefile) sil_procname) with
         is_defined= true
       ; is_hack_async
+      ; is_abstract
+      ; is_hack_wrapper
       ; hack_variadic_position
       ; formals
       ; locals
@@ -1001,7 +1066,7 @@ module ProcDescBridge = struct
       ; loc= definition_loc }
     in
     let pdesc = Cfg.create_proc_desc cfgs pattributes in
-    (* Create standalone start and end nodes. Note that SIL start node does not correspond to the start node in
+    (* Create standalone start, end, and exn_sink nodes. Note that SIL start node does not correspond to the start node in
        Textual. The latter is more like a _first node_. *)
     let module P = SilProcdesc in
     let start_node = P.create_node pdesc definition_loc P.Node.Start_node [] in
@@ -1009,7 +1074,8 @@ module ProcDescBridge = struct
     let exit_loc = LocationBridge.to_sil sourcefile exit_loc in
     let exit_node = P.create_node pdesc exit_loc P.Node.Exit_node [] in
     P.set_exit_node pdesc exit_node ;
-    (* FIXME: special exit nodes should be added *)
+    let exn_sink_node = P.create_node pdesc exit_loc P.Node.exn_sink_kind [] in
+    P.node_set_succs pdesc exn_sink_node ~normal:[exit_node] ~exn:[exit_node] ;
     let node_map : (string, Node.t * P.Node.t) Hashtbl.t = Hashtbl.create 17 in
     List.iter nodes ~f:(fun node ->
         let data = (node, NodeBridge.to_sil lang decls_env procdecl pdesc node) in
@@ -1021,7 +1087,8 @@ module ProcDescBridge = struct
     | None ->
         L.die InternalError "start node %a npt found" NodeName.pp start ) ;
     (* TODO: register this exit node *)
-    let normal_succ : Terminator.t -> P.Node.t list = function
+    let normal_succ (term : Terminator.t) =
+      match term with
       | If _ ->
           L.die InternalError "to_sil should not be called on If terminator"
       | Ret _ ->
@@ -1030,17 +1097,16 @@ module ProcDescBridge = struct
           List.map
             ~f:(fun ({label} : Terminator.node_call) -> Hashtbl.find node_map label.value |> snd)
             l
-      | Throw _ ->
-          L.die InternalError "TODO: implement throw"
-      | Unreachable ->
+      | Throw _ | Unreachable ->
           []
     in
     Hashtbl.iter
       (fun _ ((node : Node.t), sil_node) ->
-        let normal = normal_succ node.last in
         let exn : P.Node.t list =
           List.map ~f:(fun name -> Hashtbl.find node_map name.NodeName.value |> snd) node.exn_succs
         in
+        let exn = if List.is_empty exn then [exn_sink_node] else exn in
+        let normal = normal_succ node.last in
         P.node_set_succs pdesc sil_node ~normal ~exn )
       node_map
 
@@ -1143,7 +1209,8 @@ module ModuleBridge = struct
           (fun name ->
             let proc_entries = TypeName.Map.find name all_proc_entries in
             let struct_ = {Textual.Struct.name; supers= []; fields= []; attributes= []} in
-            StructBridge.to_sil lang decls_env tenv proc_entries struct_ )
+            let source_file = None in
+            StructBridge.to_sil lang decls_env tenv proc_entries source_file struct_ )
           types_used_as_enclosing_but_not_defined ;
         List.iter module_.decls ~f:(fun decl ->
             match decl with
@@ -1153,7 +1220,8 @@ module ModuleBridge = struct
                 let proc_entries =
                   TypeName.Map.find_opt strct.name all_proc_entries |> Option.value ~default:[]
                 in
-                StructBridge.to_sil lang decls_env tenv proc_entries strct
+                let source_file = Some (TextualDecls.source_file decls_env |> SourceFile.file) in
+                StructBridge.to_sil lang decls_env tenv proc_entries source_file strct
             | Procdecl _ ->
                 ()
             | Proc pdesc ->

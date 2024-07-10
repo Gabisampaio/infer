@@ -9,6 +9,8 @@ open! IStd
 
 type t
 
+val pp : Format.formatter -> t -> unit [@@warning "-unused-value-declaration"]
+
 module ProcEntry : sig
   type t = Decl of Textual.ProcDecl.t | Desc of Textual.ProcDesc.t
 end
@@ -35,7 +37,10 @@ type variadic_status =
   | NotVariadic
   | Variadic of Textual.Typ.t (* type of the variadic parameter *)
 
-val get_procdecl : t -> Textual.ProcSig.t -> (variadic_status * Textual.ProcDecl.t) option
+type generics_status = Reified | NotReified
+
+val get_procdecl :
+  t -> Textual.ProcSig.t -> int -> (variadic_status * generics_status * Textual.ProcDecl.t) option
 
 val get_procdesc : t -> Textual.ProcSig.t -> Textual.ProcDesc.t option
 

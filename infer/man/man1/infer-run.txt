@@ -5,15 +5,12 @@ SYNOPSIS
        infer run [options]
        infer [options] -- compile command
 
-
 DESCRIPTION
        Calling "infer run [options]" is equivalent to performing the
        following sequence of commands:
 
        infer capture [options]
        infer analyze [options]
-
-
 
 OPTIONS
        --capture-block-list json
@@ -52,7 +49,8 @@ OPTIONS
 
        --debug-level level
            Debug level (sets --bo-debug level, --debug-level-analysis level,
-           --debug-level-capture level):             - 0: only basic debugging enabled
+           --debug-level-capture level):
+             - 0: only basic debugging enabled
              - 1: verbose debugging enabled
              - 2: very verbose debugging enabled
 
@@ -63,6 +61,9 @@ OPTIONS
        --debug-level-capture int
            Debug level for the capture. See --debug-level for accepted
            values.
+
+       --debug-level-report int
+           Debug level for the report. See --debug-level for accepted values.
 
        --fail-on-issue
            Activates: Exit with error code 2 if Infer found something to
@@ -127,6 +128,23 @@ OPTIONS
            specified OCaml regex, even if they match the allow list specified
            by --report-allow-list-path-regex
 
+       --report-block-list-spec json
+           Do not report the issues in this list.
+                  Example format:
+                   "report-block-list-spec": [
+                       { "bug_type": "CXX_REF_CAPTURED_IN_BLOCK",
+                         "procedure_name": "foo",
+                         "file": "path/to/File.m"
+                         "comment": "This is a fp because..."
+                       },
+                       { "bug_type": "RETAIN_CYCLE",
+                         "class_name": "MyClass",
+                         "procedure_name": "my_method"
+                         "file": "path/to/File.m"
+                       }
+                   ]
+               
+
        --report-force-relative-path
            Activates: Force converting an absolute path to a relative path to
            the root directory (Conversely: --no-report-force-relative-path)
@@ -177,18 +195,23 @@ OPTIONS
 
        --  Stop argument processing, use remaining arguments as a build
            command
+
 BUCK OPTIONS
        --buck-block-list +regex
            Skip capture of files matched by the specified regular expression.
-           Only the clang, non-compilation-database                Buck integration is supported, not Java.
+           Only the clang, non-compilation-database
+                Buck integration is supported, not Java.
 
        --buck-targets-block-list +regex
            Skip capture of buck targets matched by the specified regular
            expression.
 
+       --buck2-bxl-capture-file-block-list +regex
+           Skip capture of files matched by the specified regular expression.
+           Only the clang, Buck2 integration is supported, not Java.
+
        --buck2-root dir
            Specify the parent directory of buck-out (used only for buck2).
-
 
 ENVIRONMENT
        INFER_ARGS, INFERCONFIG, INFER_STRICT_MODE
@@ -198,11 +221,6 @@ FILES
        .inferconfig
            See the FILES section in the manual of infer(1).
 
-
-
-
 SEE ALSO
        infer-analyze(1), infer-capture(1), infer-report(1)
-
-
 

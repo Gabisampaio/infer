@@ -68,6 +68,9 @@ module Import : sig
 
   val ( let<**> ) : 'a t -> ('a -> 'b AccessResult.t list) -> 'b AccessResult.t list
 
+  val bind_sat_result :
+    'c -> 'a t -> ('a -> 'b AccessResult.t list * 'c) -> 'b AccessResult.t list * 'c
+
   val ( let<+> ) :
     'a AccessResult.t -> ('a -> AbductiveDomain.t) -> ExecutionDomain.t AccessResult.t list
   (** monadic "map" but even less really that turns a [AccessResult.t] into an analysis result *)
@@ -98,12 +101,16 @@ module Import : sig
         ; address: DecompilerExpr.t
         ; must_be_valid: Trace.t * Invalidation.must_be_valid_reason option
         ; calling_context: (CallEvent.t * Location.t) list }
+    | LatentSpecializedTypeIssue of
+        {astate: AbductiveDomain.Summary.t; specialized_type: Typ.Name.t; trace: Trace.t}
 
   type base_error = AccessResult.error =
     | PotentialInvalidAccess of
         { astate: AbductiveDomain.t
         ; address: DecompilerExpr.t
         ; must_be_valid: Trace.t * Invalidation.must_be_valid_reason option }
+    | PotentialInvalidSpecializedCall of
+        {astate: AbductiveDomain.t; specialized_type: Typ.Name.t; trace: Trace.t}
     | ReportableError of {astate: AbductiveDomain.t; diagnostic: Diagnostic.t}
     | WithSummary of base_error * AbductiveDomain.Summary.t
 end

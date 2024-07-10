@@ -20,18 +20,26 @@ let pp fmt (tenv : t) =
   TypenameHash.iter (fun name typ -> Format.fprintf fmt "%a@," (Struct.pp Pp.text name) typ) tenv
 
 
+let length tenv = TypenameHash.length tenv
+
+let fold tenv ~init ~f = TypenameHash.fold f tenv init
+
 (** Create a new type environment. *)
 let create () = TypenameHash.create 1000
 
 (** Construct a struct type in a type environment *)
 let mk_struct tenv ?default ?fields ?statics ?methods ?exported_objc_methods ?supers ?objc_protocols
     ?annots ?class_info ?dummy ?source_file name =
-  let struct_typ =
-    Struct.internal_mk_struct ?default ?fields ?statics ?methods ?exported_objc_methods ?supers
-      ?objc_protocols ?annots ?class_info ?dummy ?source_file name
-  in
-  TypenameHash.replace tenv name struct_typ ;
-  struct_typ
+  match name with
+  | Typ.ObjcBlock _ | Typ.CFunction _ ->
+      L.die InternalError "%a is not allowed as a key in the tenv" Typ.Name.pp name
+  | _ ->
+      let struct_typ =
+        Struct.internal_mk_struct ?default ?fields ?statics ?methods ?exported_objc_methods ?supers
+          ?objc_protocols ?annots ?class_info ?dummy ?source_file name
+      in
+      TypenameHash.replace tenv name struct_typ ;
+      struct_typ
 
 
 (** Look up a name in the given type environment. *)
@@ -54,7 +62,7 @@ let lookup tenv name : Struct.t option =
   result
 
 
-let compare_fields (name1, _, _) (name2, _, _) = Fieldname.compare name1 name2
+let compare_fields {Struct.name= name1} {Struct.name= name2} = Fieldname.compare name1 name2
 
 let equal_fields f1 f2 = Int.equal (compare_fields f1 f2) 0
 
@@ -69,7 +77,24 @@ let add_field tenv class_tn_name field =
       ()
 
 
+(** Reorder Hack's supers so that traits come first. *)
+let reorder_hack_supers tenv ~ignore_require_extends ({Struct.supers} as str) =
+  let supers = List.map supers ~f:(fun super -> (super, lookup tenv super)) in
+  let supers =
+    if ignore_require_extends && Struct.is_hack_trait str then
+      List.filter supers ~f:(fun (_, str) ->
+          Option.exists str ~f:(fun str ->
+              Struct.is_hack_interface str || Struct.is_hack_trait str ) )
+    else supers
+  in
+  let traits, others =
+    List.partition_tf supers ~f:(fun (_, str) -> Option.exists str ~f:Struct.is_hack_trait)
+  in
+  List.map traits ~f:fst @ List.map others ~f:fst
+
+
 let fold_supers ?(ignore_require_extends = false) tenv name ~init ~f =
+  let is_hack = Typ.Name.is_hack_class name in
   let rec aux worklist visited result =
     match worklist with
     | [] ->
@@ -85,11 +110,7 @@ let fold_supers ?(ignore_require_extends = false) tenv name ~init ~f =
             aux worklist visited result
         | Some ({supers} as str) ->
             let supers =
-              if ignore_require_extends && Struct.is_hack_trait str then
-                List.filter supers ~f:(fun super ->
-                    Option.exists (lookup tenv super) ~f:(fun str ->
-                        Struct.is_hack_interface str || Struct.is_hack_trait str ) )
-              else supers
+              if is_hack then reorder_hack_supers tenv ~ignore_require_extends str else supers
             in
             let visited, result = aux supers visited result in
             aux worklist visited result )
@@ -116,7 +137,7 @@ let resolve_field_info tenv name fieldname =
 
 
 let resolve_fieldname tenv name fieldname_str =
-  let is_fld (fieldname, _, _) = String.equal (Fieldname.get_field_name fieldname) fieldname_str in
+  let is_fld {Struct.name} = String.equal (Fieldname.get_field_name name) fieldname_str in
   find_map_supers ~ignore_require_extends:true tenv name ~f:(fun name str_opt ->
       Option.bind str_opt ~f:(fun {Struct.fields} ->
           if List.exists fields ~f:is_fld then Some name else None ) )
@@ -138,24 +159,20 @@ let get_parent tenv name =
   find_map_supers tenv ~f name
 
 
-let implements_remodel_class tenv name =
-  Option.exists Typ.Name.Objc.remodel_class ~f:(fun remodel_class ->
-      mem_supers tenv name ~f:(fun name _ -> Typ.Name.equal name remodel_class) )
-
-
 let get_fields_trans =
   let module Fields = Caml.Set.Make (struct
     type t = Struct.field
 
-    let compare (x, _, _) (y, _, _) =
+    let compare {Struct.name= x} {Struct.name= y} =
       String.compare (Fieldname.get_field_name x) (Fieldname.get_field_name y)
   end) in
   fun tenv name ->
     fold_supers tenv name ~init:Fields.empty ~f:(fun _ struct_opt acc ->
         Option.fold struct_opt ~init:acc ~f:(fun acc {Struct.fields} ->
-            List.fold fields ~init:acc ~f:(fun acc (fieldname, typ, annot) ->
+            List.fold fields ~init:acc ~f:(fun acc {Struct.name= fieldname; typ; annot} ->
                 let fieldname = Fieldname.make name (Fieldname.get_field_name fieldname) in
-                Fields.add (fieldname, typ, annot) acc ) ) )
+                let field = Struct.mk_field fieldname typ ~annot in
+                Fields.add field acc ) ) )
     |> Fields.elements
 
 
@@ -226,9 +243,15 @@ let global_tenv_path = ResultsDir.get_path GlobalTypeEnvironment |> DB.filename_
 
 let read path = Serialization.read_from_file tenv_serializer path
 
-let load_global () : t option =
-  if is_none !global_tenv then global_tenv := read global_tenv_path ;
+let read_global () = read global_tenv_path
+
+let force_load_global () =
+  global_tenv := read_global () ;
   !global_tenv
+
+
+let load_global () : t option =
+  if Option.is_some !global_tenv then !global_tenv else force_load_global ()
 
 
 let load =
@@ -285,8 +308,8 @@ module Normalizer = struct
   let normalize tenv =
     let new_tenv = TypenameHash.create (TypenameHash.length tenv) in
     let normalize_mapping name tstruct =
-      let name = Typ.Name.Normalizer.normalize name in
-      let tstruct = Struct.Normalizer.normalize tstruct in
+      let name = Typ.Name.hash_normalize name in
+      let tstruct = Struct.hash_normalize tstruct in
       TypenameHash.add new_tenv name tstruct
     in
     TypenameHash.iter normalize_mapping tenv ;
@@ -299,8 +322,6 @@ let store_global ~normalize tenv =
   if Config.debug_level_capture > 0 then
     L.debug Capture Quiet "Tenv.store: global tenv has size %d bytes.@."
       (Obj.(reachable_words (repr tenv)) * (Sys.word_size_in_bits / 8)) ;
-  (* TODO(arr): normalization sometimes doesn't terminate for Hack. This needs to be investigated
-     and fixed. For now we explicitly disable normalization in Hack capture. *)
   let tenv = if normalize then Normalizer.normalize tenv else tenv in
   HashNormalizer.reset_all_normalizers () ;
   if Config.debug_level_capture > 0 then
@@ -332,11 +353,7 @@ module MethodInfo = struct
 
     type t = {proc_name: Procname.t; kind: kind} [@@deriving show {with_path= false}]
 
-    let mk_class ~kind proc_name =
-      (* The Hack's init methods are addressed as normal class methods. *)
-      let kind = if Procname.is_hack_init proc_name then IsClass else kind in
-      {proc_name; kind}
-
+    let mk_class ~kind proc_name = {proc_name; kind}
 
     (* [hackc] introduces an extra method argument in traits, to account for [self].
        Because of this, the arity of the procname called might not match the arity of the procname in
@@ -345,7 +362,7 @@ module MethodInfo = struct
        This function is to compute the correct arity offset we should apply. *)
     let get_kind ~last_class_visited class_name (kind : Struct.hack_class_kind) =
       match kind with
-      | Class | Interface ->
+      | Class | AbstractClass | Interface | Alias ->
           IsClass
       | Trait -> (
         match last_class_visited with
@@ -366,10 +383,8 @@ module MethodInfo = struct
     | Procname.CSharp _
     | Procname.Erlang _
     | Procname.Java _
-    | Procname.Linters_dummy_method
     | Procname.ObjC_Cpp _
-    | Procname.Python _
-    | Procname.WithFunctionParameters _ ->
+    | Procname.Python _ ->
         DefaultInfo (Default.mk_class proc_name)
 
 
@@ -379,7 +394,7 @@ module MethodInfo = struct
     match class_info with
     | HackClassInfo kind ->
         Hack.get_kind ~last_class_visited class_name kind
-    | NoInfo | JavaClassInfo _ ->
+    | NoInfo | CppClassInfo _ | JavaClassInfo _ ->
         Hack.IsClass
 
 
@@ -388,67 +403,83 @@ module MethodInfo = struct
   let get_hack_kind = function HackInfo {kind} -> Some kind | _ -> None
 end
 
+let is_captured tenv type_name =
+  (let open IOption.Let_syntax in
+   let* struct_ = lookup tenv type_name in
+   let* _sourcefile = struct_.Struct.source_file in
+   Some true )
+  |> Option.value ~default:false
+
+
 let resolve_method ~method_exists tenv class_name proc_name =
   let visited = ref Typ.Name.Set.empty in
   (* For Hack, we need to remember the last class we visited. Once we visit a trait, we are sure
      we will only visit traits from now on *)
   let last_class_visited = ref None in
-  let rec resolve_name_struct (class_name : Typ.Name.t) (class_struct : Struct.t) =
-    if
-      (not (Typ.Name.is_class class_name))
-      || (not (Struct.is_not_java_interface class_struct))
-      || Typ.Name.Set.mem class_name !visited
-    then None
-    else (
-      visited := Typ.Name.Set.add class_name !visited ;
-      let kind =
-        MethodInfo.get_kind_from_struct ~last_class_visited:!last_class_visited class_name
-          class_struct
-      in
-      let arity_incr =
-        match kind with
-        | IsClass ->
-            last_class_visited := Some class_name ;
-            0
-        | IsTrait {is_direct= false} ->
-            1
-        | IsTrait {is_direct= true} ->
-            (* We do not need to increase the arity when the trait method is called directly, i.e.
-               [T::foo], since the [proc_name] has the increased arity already. *)
-            0
-      in
-      let right_proc_name = Procname.replace_class ~arity_incr proc_name class_name in
-      if method_exists right_proc_name class_struct.methods then
-        Some (MethodInfo.return ~kind right_proc_name)
-      else
-        let supers_to_search =
-          match (class_name : Typ.Name.t) with
-          | ErlangType _ ->
-              L.die InternalError "attempting to call a method on an Erlang value"
-          | CStruct _ | CUnion _ | CppClass _ ->
-              (* multiple inheritance possible, search all supers *)
-              class_struct.supers
-          | HackClass _ ->
-              (* super-classes, super-interfaces, and traits are modelled via multiple inheritance *)
-              class_struct.supers
-          | JavaClass _ ->
-              (* multiple inheritance not possible, but cannot distinguish interfaces from typename so search all *)
-              class_struct.supers
-          | CSharpClass _ ->
-              (* multiple inheritance not possible, but cannot distinguish interfaces from typename so search all *)
-              class_struct.supers
-          | ObjcClass _ ->
-              (* multiple inheritance impossible, but recursive calls will throw away protocols *)
-              class_struct.supers
-          | ObjcProtocol _ ->
-              []
-          | PythonClass _ ->
-              (* We currently only support single inheritance for Python so this is straightforward *)
-              class_struct.supers
-        in
-        List.find_map supers_to_search ~f:resolve_name )
-  and resolve_name class_name = lookup tenv class_name >>= resolve_name_struct class_name in
-  resolve_name class_name
+  let missed_capture_types = ref Typ.Name.Set.empty in
+  let rec resolve_name (class_name : Typ.Name.t) =
+    Option.bind (lookup tenv class_name) ~f:(fun ({Struct.methods; supers} as class_struct) ->
+        if
+          (not (Typ.Name.is_class class_name))
+          || (not (Struct.is_not_java_interface class_struct))
+          || Typ.Name.Set.mem class_name !visited
+        then None
+        else (
+          visited := Typ.Name.Set.add class_name !visited ;
+          if Language.curr_language_is Hack && not (is_captured tenv class_name) then
+            (* we do not need to record class names for which [lookup tenv class_name == None] because
+               we assume that all direct super classes of a captured class are declared in Tenv
+               (even if not necessarily properly captured) *)
+            missed_capture_types := Typ.Name.Set.add class_name !missed_capture_types ;
+          let kind =
+            MethodInfo.get_kind_from_struct ~last_class_visited:!last_class_visited class_name
+              class_struct
+          in
+          let arity_incr =
+            match kind with
+            | IsClass ->
+                last_class_visited := Some class_name ;
+                0
+            | IsTrait {is_direct= false} ->
+                1
+            | IsTrait {is_direct= true} ->
+                (* We do not need to increase the arity when the trait method is called directly, i.e.
+                   [T::foo], since the [proc_name] has the increased arity already. *)
+                0
+          in
+          let right_proc_name = Procname.replace_class ~arity_incr proc_name class_name in
+          if method_exists right_proc_name methods then
+            Some (MethodInfo.return ~kind right_proc_name)
+          else
+            let supers_to_search =
+              match (class_name : Typ.Name.t) with
+              | ErlangType _ ->
+                  L.die InternalError "attempting to call a method on an Erlang value"
+              | CStruct _ | CUnion _ | CppClass _ ->
+                  (* multiple inheritance possible, search all supers *)
+                  supers
+              | HackClass _ ->
+                  (* super-classes, super-interfaces, and traits are modelled via multiple inheritance *)
+                  reorder_hack_supers tenv ~ignore_require_extends:false class_struct
+              | JavaClass _ ->
+                  (* multiple inheritance not possible, but cannot distinguish interfaces from typename so search all *)
+                  supers
+              | CSharpClass _ ->
+                  (* multiple inheritance not possible, but cannot distinguish interfaces from typename so search all *)
+                  supers
+              | ObjcClass _ ->
+                  (* multiple inheritance impossible, but recursive calls will throw away protocols *)
+                  supers
+              | ObjcProtocol _ | ObjcBlock _ | CFunction _ ->
+                  []
+              | PythonClass _ ->
+                  (* We currently only support single inheritance for Python so this is straightforward *)
+                  supers
+            in
+            List.find_map supers_to_search ~f:resolve_name ) )
+  in
+  let opt_info = resolve_name class_name in
+  (opt_info, !missed_capture_types)
 
 
 let find_cpp_destructor tenv class_name =
@@ -471,3 +502,69 @@ let find_cpp_constructor tenv class_name =
             false )
   | None ->
       []
+
+
+let is_trivially_copyable tenv typ =
+  Option.exists (Typ.name typ) ~f:(fun name ->
+      match lookup tenv name with
+      | Some {class_info= CppClassInfo {is_trivially_copyable}} ->
+          is_trivially_copyable
+      | _ ->
+          false )
+
+
+let get_hack_direct_used_traits tenv class_name =
+  Option.value_map (lookup tenv class_name) ~default:[] ~f:(fun {Struct.supers} ->
+      List.fold supers ~init:[] ~f:(fun acc name ->
+          match (name, lookup tenv name) with
+          | Typ.HackClass name, Some str ->
+              if Struct.is_hack_trait str then name :: acc else acc
+          | _, _ ->
+              acc ) )
+
+
+let alias_expansion_limit = 100
+
+(* recursively expand type alias, this returns None if not in Tenv at all, which may be wrong
+   TODO: track when an alias is nullable, propagate that disjunctively as we unfold definitions
+   and return that as part of the result of expansion
+*)
+let expand_hack_alias tenv tname =
+  let rec _expand_hack_alias tname n =
+    if Int.(n = 0) then (
+      L.internal_error "exceeded alias expansion limit (cycle?), not expanding" ;
+      None )
+    else
+      match lookup tenv tname with
+      | None ->
+          None
+      | Some {class_info= HackClassInfo Alias; supers= [definition_name]} ->
+          _expand_hack_alias definition_name (n - 1)
+      | Some {class_info= HackClassInfo Alias; supers= ss} -> (
+        match ss with
+        | [] ->
+            L.internal_error "empty type alias \"supers\", not expanding" ;
+            None
+        | x :: _xs ->
+            L.internal_error "alias type defined as union, taking first element" ;
+            Some x )
+      | _ ->
+          Some tname
+  in
+  _expand_hack_alias tname alias_expansion_limit
+
+
+(* This one works on Typ.t rather than Typ.name and by default leaves input alone
+   It also just preserves the quals 'cos I assume there's no reason to try to be
+   more clever with them
+*)
+let expand_hack_alias_in_typ tenv typ =
+  match typ with
+  | {Typ.desc= Tstruct (HackClass hcn); quals} -> (
+    match expand_hack_alias tenv (HackClass hcn) with
+    | None ->
+        typ (* leave it alone here ? *)
+    | Some tname ->
+        {Typ.desc= Tstruct tname; quals} )
+  | _ ->
+      typ

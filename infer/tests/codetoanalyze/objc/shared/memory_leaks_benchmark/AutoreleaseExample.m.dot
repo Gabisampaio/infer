@@ -105,11 +105,11 @@ digraph cfg {
 	
 
 	 "autorelease_test3.5fa2e6ceb6075e26_4" -> "autorelease_test3.5fa2e6ceb6075e26_3" ;
-"autorelease_test3.5fa2e6ceb6075e26_5" [label="5:  DeclStmt \n   VARIABLE_DECLARED(string:NSString*); [line 59, column 3]\n  n$3=_fun___objc_alloc_no_fail(sizeof(t=NSString):unsigned long) [line 59, column 23]\n  n$4=_fun_NSObject.autorelease(n$3:NSString*) virtual [line 59, column 22]\n  *&string:NSString*=n$4 [line 59, column 3]\n " shape="box"]
+"autorelease_test3.5fa2e6ceb6075e26_5" [label="5:  DeclStmt \n   VARIABLE_DECLARED(string:NSString*); [line 59, column 3]\n  n$3=_fun___objc_alloc_no_fail(sizeof(t=NSString;nullable=false):unsigned long) [line 59, column 23]\n  n$4=_fun_NSObject.autorelease(n$3:NSString*) virtual [line 59, column 22]\n  *&string:NSString*=n$4 [line 59, column 3]\n " shape="box"]
 	
 
 	 "autorelease_test3.5fa2e6ceb6075e26_5" -> "autorelease_test3.5fa2e6ceb6075e26_4" ;
-"autorelease_test3.5fa2e6ceb6075e26_6" [label="6:  DeclStmt \n   VARIABLE_DECLARED(pool:NSAutoreleasePool*); [line 58, column 3]\n  n$5=_fun___objc_alloc_no_fail(sizeof(t=NSAutoreleasePool):unsigned long) [line 58, column 30]\n  n$6=_fun_NSObject.init(n$5:NSAutoreleasePool*) virtual [line 58, column 29]\n  *&pool:NSAutoreleasePool*=n$6 [line 58, column 3]\n " shape="box"]
+"autorelease_test3.5fa2e6ceb6075e26_6" [label="6:  DeclStmt \n   VARIABLE_DECLARED(pool:NSAutoreleasePool*); [line 58, column 3]\n  n$5=_fun___objc_alloc_no_fail(sizeof(t=NSAutoreleasePool;nullable=false):unsigned long) [line 58, column 30]\n  n$6=_fun_NSObject.init(n$5:NSAutoreleasePool*) virtual [line 58, column 29]\n  *&pool:NSAutoreleasePool*=n$6 [line 58, column 3]\n " shape="box"]
 	
 
 	 "autorelease_test3.5fa2e6ceb6075e26_6" -> "autorelease_test3.5fa2e6ceb6075e26_5" ;
@@ -128,7 +128,7 @@ digraph cfg {
 	
 
 	 "createA.48a5d7f480131d59_4" -> "createA.48a5d7f480131d59_2" ;
-"createA.48a5d7f480131d59_5" [label="5:  DeclStmt \n   VARIABLE_DECLARED(s1:Auto*); [line 28, column 3]\n  n$2=_fun___objc_alloc_no_fail(sizeof(t=Auto):unsigned long) [line 28, column 15]\n  n$3=_fun_NSObject.init(n$2:Auto*) virtual [line 28, column 14]\n  *&s1:Auto*=n$3 [line 28, column 3]\n " shape="box"]
+"createA.48a5d7f480131d59_5" [label="5:  DeclStmt \n   VARIABLE_DECLARED(s1:Auto*); [line 28, column 3]\n  n$2=_fun___objc_alloc_no_fail(sizeof(t=Auto;nullable=false):unsigned long) [line 28, column 15]\n  n$3=_fun_NSObject.init(n$2:Auto*) virtual [line 28, column 14]\n  *&s1:Auto*=n$3 [line 28, column 3]\n " shape="box"]
 	
 
 	 "createA.48a5d7f480131d59_5" -> "createA.48a5d7f480131d59_3" ;
@@ -147,34 +147,17 @@ digraph cfg {
 	
 
 	 "autorelease_main#Auto#[instance].033d15a3ff1df677_4" -> "autorelease_main#Auto#[instance].033d15a3ff1df677_2" ;
-"autorelease_main#Auto#[instance].033d15a3ff1df677_5" [label="5:  DeclStmt \n   VARIABLE_DECLARED(s:NSString*); [line 21, column 3]\n  n$2=_fun___objc_alloc_no_fail(sizeof(t=NSString):unsigned long) [line 21, column 17]\n  *&s:NSString*=n$2 [line 21, column 3]\n " shape="box"]
+"autorelease_main#Auto#[instance].033d15a3ff1df677_5" [label="5:  DeclStmt \n   VARIABLE_DECLARED(s:NSString*); [line 21, column 3]\n  n$2=_fun___objc_alloc_no_fail(sizeof(t=NSString;nullable=false):unsigned long) [line 21, column 17]\n  *&s:NSString*=n$2 [line 21, column 3]\n " shape="box"]
 	
 
 	 "autorelease_main#Auto#[instance].033d15a3ff1df677_5" -> "autorelease_main#Auto#[instance].033d15a3ff1df677_3" ;
 "dealloc#Auto#[instance].c3f7b6216f9a7edb_1" [label="1: Start Auto.dealloc\nFormals:  self:Auto*\nLocals:  \n  " color=yellow style=filled]
 	
 
-	 "dealloc#Auto#[instance].c3f7b6216f9a7edb_1" -> "dealloc#Auto#[instance].c3f7b6216f9a7edb_4" ;
+	 "dealloc#Auto#[instance].c3f7b6216f9a7edb_1" -> "dealloc#Auto#[instance].c3f7b6216f9a7edb_2" ;
 "dealloc#Auto#[instance].c3f7b6216f9a7edb_2" [label="2: Exit Auto.dealloc \n  " color=yellow style=filled]
 	
 
-"dealloc#Auto#[instance].c3f7b6216f9a7edb_3" [label="3:  Call dealloc \n   n$0=*&self:Auto* [line 25, column 1]\n  n$1=*n$0._son:Auto* [line 25, column 1]\n  n$2=_fun_Auto.dealloc(n$1:Auto*) [line 25, column 1]\n " shape="box"]
-	
-
-	 "dealloc#Auto#[instance].c3f7b6216f9a7edb_3" -> "dealloc#Auto#[instance].c3f7b6216f9a7edb_2" ;
-"dealloc#Auto#[instance].c3f7b6216f9a7edb_4" [label="4:  Call dealloc \n   n$3=*&self:Auto* [line 18, column 1]\n  n$4=_fun___objc_get_ref_count(n$3:Auto*) [line 18, column 1]\n  n$5=_fun___objc_set_ref_count(n$3:Auto*,(n$4 - 1):unsigned int) [line 18, column 1]\n  n$6=_fun___objc_get_ref_count(n$3:Auto*) [line 18, column 1]\n " shape="box"]
-	
-
-	 "dealloc#Auto#[instance].c3f7b6216f9a7edb_4" -> "dealloc#Auto#[instance].c3f7b6216f9a7edb_5" ;
-	 "dealloc#Auto#[instance].c3f7b6216f9a7edb_4" -> "dealloc#Auto#[instance].c3f7b6216f9a7edb_6" ;
-"dealloc#Auto#[instance].c3f7b6216f9a7edb_5" [label="5: Prune (true branch, if (terminated)) \n   PRUNE((n$6 == 0), true); [line 18, column 1]\n " shape="invhouse"]
-	
-
-	 "dealloc#Auto#[instance].c3f7b6216f9a7edb_5" -> "dealloc#Auto#[instance].c3f7b6216f9a7edb_3" ;
-"dealloc#Auto#[instance].c3f7b6216f9a7edb_6" [label="6: Prune (false branch, if (terminated)) \n   PRUNE((n$6 != 0), false); [line 18, column 1]\n " shape="invhouse"]
-	
-
-	 "dealloc#Auto#[instance].c3f7b6216f9a7edb_6" -> "dealloc#Auto#[instance].c3f7b6216f9a7edb_2" ;
 "setSon:#Auto(class Auto)#[instanc.3d71c66b9bada0f1_1" [label="1: Start Auto.setSon:\nFormals:  self:Auto* son:Auto*\nLocals:  \n  " color=yellow style=filled]
 	
 

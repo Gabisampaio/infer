@@ -27,13 +27,10 @@
    -open
    Absint
    -open
-   Topllib
-   -open
-   Nullsafe))
+   Topllib))
  (libraries
   core
   iter
-  ocamlgraph
   ppx_show.runtime
   IStdlib
   ATDGenerated
@@ -41,8 +38,7 @@
   IR
   Textuallib
   Absint
-  Topllib
-  Nullsafe)
+  Topllib)
  (preprocess
   (pps
    ppx_compare

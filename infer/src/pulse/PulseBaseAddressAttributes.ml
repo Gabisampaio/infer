@@ -61,7 +61,7 @@ let mk_transitive_taint_from_subst f_keep memory =
         match Attributes.get_propagate_taint_from attrs with
         | None ->
             taint_from_map
-        | Some taints_in ->
+        | Some (_, taints_in) ->
             List.fold ~init:taint_from_map
               ~f:(fun acc {Attribute.v= from} ->
                 match AbstractValue.Map.find_opt addr acc with
@@ -151,6 +151,8 @@ let hack_async_await address memory = add_one address Attribute.HackAsyncAwaited
 
 let csharp_resource_release address memory = add_one address Attribute.CSharpResourceReleased memory
 
+let in_reported_retain_cycle address memory = add_one address Attribute.InReportedRetainCycle memory
+
 let mark_as_end_of_collection address memory = add_one address Attribute.EndOfCollection memory
 
 let check_valid address attrs =
@@ -197,10 +199,20 @@ let remove_taint_sanitizer = remove_attribute Attributes.remove_taint_sanitized
 
 let remove_propagate_taint_from = remove_attribute Attributes.remove_propagate_taint_from
 
+let remove_all_must_not_be_tainted ?kinds = Graph.map (Attributes.remove_must_not_be_tainted ?kinds)
+
 let remove_taint_attrs address memory =
   remove_tainted address memory |> remove_taint_sanitizer address
   |> remove_propagate_taint_from address
 
+
+let remove_hack_builder = remove_attribute Attributes.remove_hack_builder
+
+let set_hack_builder address builderstate memory =
+  remove_hack_builder address memory |> add_one address (Attribute.HackBuilder builderstate)
+
+
+let get_hack_builder = get_attribute Attributes.get_hack_builder
 
 let remove_must_be_valid_attr = remove_attribute Attributes.remove_must_be_valid
 
@@ -253,29 +265,23 @@ let get_written_to = get_attribute Attributes.get_written_to
 
 let get_returned_from_unknown = get_attribute Attributes.get_returned_from_unknown
 
-let add_dynamic_type typ address memory = add_one address (Attribute.DynamicType (typ, None)) memory
+let add_dict_contain_const_keys address memory = add_one address DictContainConstKeys memory
 
-let add_dynamic_type_source_file typ source_file address memory =
-  add_one address (Attribute.DynamicType (typ, Some source_file)) memory
+let remove_dict_contain_const_keys = remove_attribute Attributes.remove_dict_contain_const_keys
 
-
-let get_dynamic_type_source_file attrs v =
-  get_attribute Attributes.get_dynamic_type_source_file v attrs
+let is_dict_contain_const_keys address attrs =
+  Graph.find_opt address attrs |> Option.exists ~f:Attributes.is_dict_contain_const_keys
 
 
-let get_dynamic_type attrs v =
-  match get_dynamic_type_source_file attrs v with Some (typ, _) -> Some typ | None -> None
+let add_dict_read_const_key timestamp trace address key attrs =
+  add_one address (DictReadConstKeys (Attribute.ConstKeys.singleton key (timestamp, trace))) attrs
 
+
+let get_dict_read_const_keys = get_attribute Attributes.get_dict_read_const_keys
 
 let add_static_type typ address memory = add_one address (Attribute.StaticType typ) memory
 
 let get_static_type attrs v = get_attribute Attributes.get_static_type v attrs
-
-let add_ref_counted address memory = add_one address Attribute.RefCounted memory
-
-let is_ref_counted address attrs =
-  Graph.find_opt address attrs |> Option.exists ~f:Attributes.is_ref_counted
-
 
 let std_vector_reserve address memory = add_one address Attribute.StdVectorReserve memory
 
@@ -286,8 +292,6 @@ let add_copied_return address ~source ~is_const_ref from copied_location memory 
 
 
 let get_config_usage address attrs = get_attribute Attributes.get_config_usage address attrs
-
-let get_const_string address attrs = get_attribute Attributes.get_const_string address attrs
 
 let get_used_as_branch_cond address attrs =
   get_attribute Attributes.get_used_as_branch_cond address attrs
@@ -305,6 +309,10 @@ let is_csharp_resource_released adress attrs =
   Graph.find_opt adress attrs |> Option.exists ~f:Attributes.is_csharp_resource_released
 
 
+let is_in_reported_retain_cycle address attrs =
+  Graph.find_opt address attrs |> Option.exists ~f:Attributes.is_in_reported_retain_cycle
+
+
 let is_std_moved address attrs =
   Graph.find_opt address attrs |> Option.exists ~f:Attributes.is_std_moved
 
@@ -313,8 +321,15 @@ let is_std_vector_reserved address attrs =
   Graph.find_opt address attrs |> Option.exists ~f:Attributes.is_std_vector_reserved
 
 
+let get_last_lookup address attrs = get_attribute Attributes.get_last_lookup address attrs
+
 let get_address_of_stack_variable address attrs =
   get_attribute Attributes.get_address_of_stack_variable address attrs
+
+
+let has_unknown_effect address attrs =
+  Graph.find_opt address attrs
+  |> Option.exists ~f:(fun attribute -> Option.is_some (Attributes.get_unknown_effect attribute))
 
 
 let merge attrs attrs' =
@@ -375,7 +390,15 @@ module type S = sig
 
   val hack_async_await : key -> t -> t
 
+  val remove_hack_builder : key -> t -> t
+
+  val set_hack_builder : key -> Attribute.Builder.t -> t -> t
+
+  val get_hack_builder : key -> t -> Attribute.Builder.t option
+
   val csharp_resource_release : key -> t -> t
+
+  val in_reported_retain_cycle : key -> t -> t
 
   val fold : (key -> Attributes.t -> 'a -> 'a) -> t -> 'a -> 'a
 
@@ -409,21 +432,19 @@ module type S = sig
 
   val get_must_be_initialized : key -> t -> (Timestamp.t * Trace.t) option
 
-  val add_dynamic_type : Typ.t -> key -> t -> t
+  val add_dict_contain_const_keys : key -> t -> t
 
-  val add_dynamic_type_source_file : Typ.t -> SourceFile.t -> key -> t -> t
+  val remove_dict_contain_const_keys : key -> t -> t
 
-  val get_dynamic_type : t -> key -> Typ.t option
+  val is_dict_contain_const_keys : key -> t -> bool
 
-  val get_dynamic_type_source_file : t -> key -> (Typ.t * SourceFile.t option) option
+  val add_dict_read_const_key : Timestamp.t -> Trace.t -> key -> Fieldname.t -> t -> t
+
+  val get_dict_read_const_keys : key -> t -> Attribute.ConstKeys.t option
 
   val add_static_type : Typ.Name.t -> key -> t -> t
 
   val get_static_type : t -> key -> Typ.Name.t option
-
-  val add_ref_counted : key -> t -> t
-
-  val is_ref_counted : key -> t -> bool
 
   val get_written_to : key -> t -> (Timestamp.t * Trace.t) option
 
@@ -433,9 +454,13 @@ module type S = sig
 
   val is_csharp_resource_released : key -> t -> bool
 
+  val is_in_reported_retain_cycle : key -> t -> bool
+
   val is_std_moved : key -> t -> bool
 
   val is_std_vector_reserved : key -> t -> bool
+
+  val get_last_lookup : key -> t -> AbstractValue.t option
 
   val mark_as_end_of_collection : key -> t -> t
 
@@ -448,17 +473,19 @@ module type S = sig
 
   val get_config_usage : key -> t -> Attribute.ConfigUsage.t option
 
-  val get_const_string : key -> t -> string option
-
   val get_used_as_branch_cond : key -> t -> (Procname.t * Location.t * Trace.t) option
 
   val remove_allocation_attr : key -> t -> t
 
   val remove_taint_attrs : key -> t -> t
 
+  val remove_all_must_not_be_tainted : ?kinds:TaintConfig.Kind.Set.t -> t -> t
+
   val remove_must_be_valid_attr : key -> t -> t
 
   val initialize : key -> t -> t
 
   val get_address_of_stack_variable : key -> t -> (Var.t * Location.t * ValueHistory.t) option
+
+  val has_unknown_effect : key -> t -> bool
 end

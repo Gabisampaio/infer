@@ -13,13 +13,15 @@ open PulseDomainInterface
 val matchers : matcher list
 
 val get_model_from_db :
-  Procname.t -> PulseValueOrigin.t ProcnameDispatcher.Call.FuncArg.t list -> model option
+     Procname.t
+  -> PulseValueOrigin.t ProcnameDispatcher.Call.FuncArg.t list
+  -> model_no_non_disj option
 
 val get_module_attribute : Tenv.t -> tag:string -> string option
-  [@@warning "-unused-value-declaration"]
+[@@warning "-unused-value-declaration"]
 
 val get_erlang_type_or_any : AbstractValue.t -> AbductiveDomain.t -> ErlangTypeName.t
-  [@@warning "-unused-value-declaration"]
+[@@warning "-unused-value-declaration"]
 
 include sig
   [@@@warning "-unused-module"]
@@ -34,6 +36,9 @@ include sig
       | Tuple of erlang_value list
       | GenServer of {module_name: string option}
 
-    val return_value_model : erlang_value -> model [@@warning "-unused-value-declaration"]
+    val return_value_model : erlang_value -> model_no_non_disj
+    [@@warning "-unused-value-declaration"]
+
+    val exists_db_model : Procname.t -> bool
   end
 end

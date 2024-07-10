@@ -32,8 +32,6 @@ let create_objc_class_method class_name method_name parameters =
 
 let is_declared pname = Procname.Set.mem pname !builtin_decls
 
-let __array_access = create_procname "__array_access"
-
 let __assert_fail = create_procname "__assert_fail"
 
 let __atomic_fetch_max = create_procname "__atomic_fetch_max"
@@ -74,6 +72,10 @@ let __builtin_offsetof = create_procname "__builtin_offsetof"
 
 let __cast = create_procname "__cast"
 
+let __call_objc_block = create_procname "__call_objc_block"
+
+let __call_c_function_ptr = create_procname "__call_c_function_ptr"
+
 let __cxx_typeid = create_procname "__cxx_typeid"
 
 let __delete = create_procname "__delete"
@@ -98,6 +100,8 @@ let __erlang_greater = create_procname "__erlang_greater"
 
 let __erlang_greater_or_equal = create_procname "__erlang_greater_or_equal"
 
+let __erlang_error_badgenerator = create_procname "__erlang_error_badgenerator"
+
 let __erlang_error_badkey = create_procname "__erlang_error_badkey"
 
 let __erlang_error_badmatch = create_procname "__erlang_error_badmatch"
@@ -109,6 +113,8 @@ let __erlang_error_badrecord = create_procname "__erlang_error_badrecord"
 let __erlang_error_badreturn = create_procname "__erlang_error_badreturn"
 
 let __erlang_error_case_clause = create_procname "__erlang_error_case_clause"
+
+let __erlang_error_else_clause = create_procname "__erlang_error_else_clause"
 
 let __erlang_error_function_clause = create_procname "__erlang_error_function_clause"
 
@@ -132,6 +138,8 @@ let __erlang_make_str_const = create_procname "__erlang_make_str_const"
 
 let __erlang_make_bitstring = create_procname "__erlang_make_bitstring"
 
+let __erlang_map_to_list = create_procname "__erlang_map_to_list"
+
 let __erlang_receive = create_procname "__erlang_receive"
 
 let __erlang_str_equal = create_procname "__erlang_str_equal"
@@ -145,8 +153,6 @@ let __get_array_length = create_procname "__get_array_length"
 let __get_hidden_field = create_procname "__get_hidden_field"
 
 let __get_type_of = create_procname "__get_type_of"
-
-let __global_access = create_procname "__global_access"
 
 let __infer_assume = create_procname "__infer_assume"
 
@@ -167,6 +173,8 @@ let __infer_structured_binding = create_procname "__infer_structured_binding"
 let __instanceof = create_procname "__instanceof"
 
 let __java_throw = create_procname "__java_throw"
+
+let __hack_throw = create_procname "__hack_throw"
 
 let __get_lazy_class = create_procname "__get_lazy_class"
 

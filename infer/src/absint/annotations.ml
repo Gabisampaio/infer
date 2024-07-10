@@ -9,29 +9,11 @@ open! IStd
 
 (** Annotations. *)
 
-let any_thread = "AnyThread"
-
 let auto_cleanup = "AutoCleanup"
-
-let bind = "Bind"
-
-let bind_view = "BindView"
-
-let bind_array = "BindArray"
-
-let bind_bitmap = "BindBitmap"
-
-let bind_drawable = "BindDrawable"
-
-let bind_string = "BindString"
 
 let camel_nonnull = "NonNull"
 
-let cleanup = "Cleanup"
-
 let expensive = "Expensive"
-
-let false_on_null = "FalseOnNull"
 
 let for_ui_thread = "ForUiThread"
 
@@ -50,10 +32,6 @@ let initializer_ = "Initializer"
 let inject = "Inject"
 
 let inject_prop = "InjectProp"
-
-let inject_view = "InjectView"
-
-let json_field = "JsonField"
 
 let lockless = "Lockless"
 
@@ -99,8 +77,6 @@ let synchronized_collection = "SynchronizedCollection"
 
 let suppress_lint = "SuppressLint"
 
-let suppress_view_nullability = "SuppressViewNullability"
-
 let recently_nonnull = "RecentlyNonNull"
 
 let recently_nullable = "RecentlyNullable"
@@ -108,10 +84,6 @@ let recently_nullable = "RecentlyNullable"
 let thread_confined = "ThreadConfined"
 
 let thread_safe = "ThreadSafe"
-
-let thrift_service = "ThriftService"
-
-let true_on_null = "TrueOnNull"
 
 let ui_thread = "UiThread"
 
@@ -170,7 +142,9 @@ let pname_has_return_annot pname predicate =
 let attrs_return_annot_ends_with attrs annot = ia_ends_with attrs.ProcAttributes.ret_annots annot
 
 let field_has_annot fieldname (struct_typ : Struct.t) predicate =
-  let fld_has_taint_annot (fname, _, annot) = Fieldname.equal fieldname fname && predicate annot in
+  let fld_has_taint_annot {Struct.name= fname; annot} =
+    Fieldname.equal fieldname fname && predicate annot
+  in
   List.exists ~f:fld_has_taint_annot struct_typ.fields
   || List.exists ~f:fld_has_taint_annot struct_typ.statics
 
@@ -178,8 +152,6 @@ let field_has_annot fieldname (struct_typ : Struct.t) predicate =
 let struct_typ_has_annot (struct_typ : Struct.t) predicate = predicate struct_typ.annots
 
 let ia_is_not_thread_safe ia = ia_ends_with ia not_thread_safe
-
-let ia_is_propagates_nullable ia = ia_ends_with ia propagates_nullable
 
 let ia_is_nullable ia =
   List.exists ~f:(ia_ends_with ia)
@@ -217,48 +189,17 @@ let ia_is_nullsafe_strict ia = ia_ends_with ia nullsafe_strict
 
 let ia_find_nullsafe ia = find_ia_ends_with ia nullsafe
 
-let ia_is_false_on_null ia = ia_ends_with ia false_on_null
-
 let ia_is_returns_ownership ia = ia_ends_with ia returns_ownership
 
 let ia_is_synchronized_collection ia = ia_ends_with ia synchronized_collection
 
 let ia_is_thread_safe ia = ia_ends_with ia thread_safe
 
-let ia_is_thrift_service ia = ia_ends_with ia thrift_service
-
-let ia_is_true_on_null ia = ia_ends_with ia true_on_null
-
 let ia_is_nonblocking ia = ia_ends_with ia nonblocking
 
 let ia_is_initializer ia = ia_ends_with ia initializer_
 
-let ia_is_cleanup ia = ia_ends_with ia cleanup
-
 let ia_is_volatile ia = ia_contains ia volatile
-
-let field_injector_readwrite_list =
-  [ inject_view
-  ; bind
-  ; bind_view
-  ; bind_array
-  ; bind_bitmap
-  ; bind_drawable
-  ; bind_string
-  ; suppress_view_nullability ]
-
-
-let field_injector_readonly_list = inject :: field_injector_readwrite_list
-
-(** Annotations for readonly injectors. The injector framework initializes the field but does not
-    write null into it. *)
-let ia_is_field_injector_readonly ia = List.exists ~f:(ia_ends_with ia) field_injector_readonly_list
-
-(** Annotations for read-write injectors. The injector framework initializes the field and can write
-    null into it. *)
-let ia_is_field_injector_readwrite ia =
-  List.exists ~f:(ia_ends_with ia) field_injector_readwrite_list
-
 
 let ia_is_expensive ia = ia_ends_with ia expensive
 
@@ -267,8 +208,6 @@ let ia_is_functional ia = ia_ends_with ia functional
 let ia_is_ignore_allocations ia = ia_ends_with ia ignore_allocations
 
 let ia_is_inject ia = ia_ends_with ia inject
-
-let ia_is_json_field ia = ia_ends_with ia json_field
 
 let ia_is_suppress_lint ia = ia_ends_with ia suppress_lint
 

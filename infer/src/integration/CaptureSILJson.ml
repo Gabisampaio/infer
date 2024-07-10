@@ -38,18 +38,19 @@ let parse_list_parameters (eleparse : Safe.t -> 'a) (json : Safe.t) =
   List.map ~f:eleparse (to_list json) |> List.map ~f:parse_parameter
 
 
-let parse_cil_type_name (str : string) : Typ.t =
+let parse_cil_type_name =
   let r = Str.regexp "\\." in
-  try
-    let n = Str.search_backward r str (String.length str) in
-    let _namespace = Str.string_before str n in
-    let _name = Str.string_after str (n + 1) in
-    Typ.(
-      mk_ptr
-        (mk_struct
-           (CSharpClass (CSharpClassName.make ~namespace:(Some _namespace) ~classname:_name)) ) )
-  with _ ->
-    Typ.(mk_ptr (mk_struct (CSharpClass (CSharpClassName.make ~namespace:None ~classname:str))))
+  fun (str : string) : Typ.t ->
+    try
+      let n = Str.search_backward r str (String.length str) in
+      let _namespace = Str.string_before str n in
+      let _name = Str.string_after str (n + 1) in
+      Typ.(
+        mk_ptr
+          (mk_struct
+             (CSharpClass (CSharpClassName.make ~namespace:(Some _namespace) ~classname:_name)) ) )
+    with _ ->
+      Typ.(mk_ptr (mk_struct (CSharpClass (CSharpClassName.make ~namespace:None ~classname:str))))
 
 
 let parse_cil_procname (json : Safe.t) : Procname.t =
@@ -306,11 +307,18 @@ and parse_exp (json : Safe.t) =
     let dl = try Some (parse_exp (member "dynamic_length" json)) with Type_error _ -> None in
     match s with
     | "exact" ->
-        Exp.Sizeof {typ= t; nbytes= None; dynamic_length= dl; subtype= Subtype.exact}
+        Exp.Sizeof
+          {typ= t; nbytes= None; dynamic_length= dl; subtype= Subtype.exact; nullable= false}
     | "instof" ->
-        Exp.Sizeof {typ= t; nbytes= None; dynamic_length= dl; subtype= Subtype.subtypes_instof}
+        Exp.Sizeof
+          { typ= t
+          ; nbytes= None
+          ; dynamic_length= dl
+          ; subtype= Subtype.subtypes_instof
+          ; nullable= false }
     | "cast" ->
-        Exp.Sizeof {typ= t; nbytes= None; dynamic_length= dl; subtype= Subtype.subtypes_cast}
+        Exp.Sizeof
+          {typ= t; nbytes= None; dynamic_length= dl; subtype= Subtype.subtypes_cast; nullable= false}
     | _ ->
         Logging.die InternalError "Subtype in Sizeof instruction is not supported."
   else Logging.die InternalError "Unknown expression kind %s" ekind
@@ -320,7 +328,7 @@ and parse_struct_field (json : Safe.t) =
   let fi = parse_fieldident json in
   let t = parse_sil_type_name (member "type" json) in
   let annot = parse_item_annotation (member "annotation" json) in
-  (fi, t, annot)
+  Struct.mk_field fi t ~annot
 
 
 and parse_sil_type_name (json : Safe.t) : Typ.t =
@@ -400,7 +408,14 @@ let parse_proc_attributes_locals (json : Safe.t) : ProcAttributes.var_data =
   let n, t, _ = parse_proc_attributes_var json in
   let mib = to_bool (member "modify_in_block" json) in
   let ice = to_bool (member "is_const_expr" json) in
-  {name= n; typ= t; modify_in_block= mib; is_constexpr= ice; is_declared_unused= false; tmp_id= None}
+  { name= n
+  ; typ= t
+  ; modify_in_block= mib
+  ; is_constexpr= ice
+  ; is_declared_unused= false
+  ; is_structured_binding= false
+  ; has_cleanup_attribute= false
+  ; tmp_id= None }
 
 
 let parse_proc_attributes (json : Safe.t) =

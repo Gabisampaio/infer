@@ -19,11 +19,29 @@ val string_of_visibility : visibility -> string
 (** severity of the report *)
 type severity = Info | Advice | Warning | Error [@@deriving compare, equal, enumerate]
 
+type category =
+  | Concurrency
+  | LogicError
+  | MemoryError
+  | NoCategory
+  | NullPointerDereference
+  | PerfRegression
+  | ResourceLeak
+  | RuntimeException
+  | SensitiveDataFlow
+  | UngatedCode
+[@@deriving compare, equal, enumerate]
+
 val string_of_severity : severity -> string
+
+val string_of_category : category -> string
+
+val category_documentation : category -> string
 
 type t = private
   { unique_id: string
   ; checker: Checker.t
+  ; category: category
   ; visibility: visibility
   ; user_documentation: string option
   ; mutable default_severity: severity
@@ -81,6 +99,8 @@ val bad_footprint : t
 
 val bad_arg : latent:bool -> t
 
+val bad_generator : latent:bool -> t
+
 val bad_key : latent:bool -> t
 
 val bad_map : latent:bool -> t
@@ -129,8 +149,6 @@ val checkers_expensive_overrides_unexpensive : t
 
 val checkers_fragment_retain_view : t
 
-val checkers_immutable_cast : t
-
 val checkers_printf_args : t
 
 val class_cast_exception : t
@@ -151,17 +169,13 @@ val pulse_const_refable : t
 
 val constant_address_dereference : latent:bool -> t
 
-val create_intent_from_uri : t
-
-val cross_site_scripting : t
+val cxx_ref_captured_in_block : t
 
 val dangling_pointer_dereference : t
 
 val dangling_pointer_dereference_maybe : t
 
 val data_flow_to_sink : t
-
-val datalog_fact : t
 
 val dead_store : t
 
@@ -173,44 +187,6 @@ val do_not_report : t
 (** an issue type that should never be reported *)
 
 val empty_vector_access : t
-
-val eradicate_annotation_graph : t
-
-val eradicate_condition_redundant : t
-
-val eradicate_field_not_initialized : t
-
-val eradicate_field_not_nullable : t
-
-val eradicate_field_over_annotated : t
-
-val eradicate_inconsistent_subclass_parameter_annotation : t
-
-val eradicate_inconsistent_subclass_return_annotation : t
-
-val eradicate_redundant_nested_class_annotation : t
-
-val eradicate_bad_nested_class_annotation : t
-
-val eradicate_nullable_dereference : t
-
-val eradicate_parameter_not_nullable : t
-
-val eradicate_return_not_nullable : t
-
-val eradicate_return_over_annotated : t
-
-val eradicate_unvetted_third_party_in_nullsafe : t
-
-val eradicate_unchecked_usage_in_nullsafe : t
-
-val eradicate_meta_class_can_be_nullsafe : t
-
-val eradicate_meta_class_needs_improvement : t
-
-val eradicate_meta_class_is_nullsafe : t
-
-val exposed_insecure_intent_handling : t
 
 val expensive_cost_call : kind:CostKind.t -> t
 
@@ -236,8 +212,6 @@ val infinite_cost_call : kind:CostKind.t -> t
 
 val inherently_dangerous_function : t
 
-val insecure_intent_handling : t
-
 val integer_overflow_l1 : t
 
 val integer_overflow_l2 : t
@@ -256,8 +230,6 @@ val invariant_call : t
 
 val ipc_on_ui_thread : t
 
-val javascript_injection : t
-
 val lab_resource_leak : t
 
 val leak_after_array_abstraction : t
@@ -269,8 +241,6 @@ val leak_unknown_origin : t
 val lockless_violation : t
 
 val lock_consistency_violation : t
-
-val logging_private_data : t
 
 val expensive_loop_invariant_call : t
 
@@ -286,6 +256,8 @@ val modifies_immutable : t
 
 val multiple_weakself : t
 
+val mutual_recursion_cycle : t
+
 val nil_block_call : latent:bool -> t
 
 val nil_insertion_into_collection : latent:bool -> t
@@ -295,6 +267,8 @@ val nil_messaging_to_non_pod : latent:bool -> t
 val no_match_of_rhs : latent:bool -> t
 
 val no_matching_case_clause : latent:bool -> t
+
+val no_matching_else_clause : latent:bool -> t
 
 val no_matching_function_clause : latent:bool -> t
 
@@ -318,6 +292,12 @@ val precondition_not_met : t
 
 val premature_nil_termination : t
 
+val pulse_cannot_instantiate_abstract_class : t
+
+val pulse_dict_missing_key : t
+
+val pulse_dynamic_type_mismatch : t
+
 val pulse_transitive_access : t
 
 val pulse_memory_leak_c : t
@@ -326,11 +306,13 @@ val pulse_memory_leak_cpp : t
 
 val pulse_resource_leak : t
 
+val pulse_unawaited_awaitable : t
+
+val pulse_unfinished_builder : t
+
 val pulse_uninitialized_const : t
 
 val pure_function : t
-
-val quandary_taint_error : t
 
 val readonly_shared_ptr_param : t
 
@@ -340,19 +322,15 @@ val resource_leak : t
 
 val retain_cycle : t
 
+val retain_cycle_no_weak_info : t
+
 val scope_leakage : t
+
+val self_in_block_passed_to_init : t
 
 val sensitive_data_flow : t
 
 val skip_function : t
-
-val shell_injection : t
-
-val shell_injection_risk : t
-
-val sql_injection : t
-
-val sql_injection_risk : t
 
 val stack_variable_address_escape : t
 
@@ -372,9 +350,7 @@ val thread_safety_violation : t
 
 val topl_error : latent:bool -> t
 
-val uninitialized_value : t
-
-val uninitialized_value_pulse : latent:bool -> t
+val uninitialized_value_pulse : t
 
 val unnecessary_copy_pulse : t
 
@@ -403,28 +379,6 @@ val use_after_delete : latent:bool -> t
 val use_after_free : latent:bool -> t
 
 val use_after_lifetime : latent:bool -> t
-
-val untrusted_buffer_access : t
-
-val untrusted_deserialization : t
-
-val untrusted_deserialization_risk : t
-
-val untrusted_file : t
-
-val untrusted_file_risk : t
-
-val untrusted_heap_allocation : t
-
-val untrusted_intent_creation : t
-
-val untrusted_url_risk : t
-
-val untrusted_environment_change_risk : t
-
-val untrusted_variable_length_array : t
-
-val user_controlled_sql_risk : t
 
 val vector_invalidation : latent:bool -> t
 

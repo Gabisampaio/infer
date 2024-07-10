@@ -522,7 +522,7 @@ let texp_star tenv texp1 texp2 =
         true
     | _, [] ->
         false
-    | (f1, _, _) :: ftal1', (f2, _, _) :: ftal2' -> (
+    | {Struct.name= f1} :: ftal1', {Struct.name= f2} :: ftal2' -> (
       match Fieldname.compare f1 f2 with
       | n when n < 0 ->
           false
@@ -767,14 +767,12 @@ let combine ({InterproceduralAnalysis.proc_desc= caller_pdesc; tenv; _} as analy
       else
         List.map
           ~f:(fun (p, path_post) ->
-            (p, Paths.Path.add_call (include_subtrace callee_pname) path_pre callee_pname path_post)
-            )
+            (p, Paths.Path.add_call (include_subtrace callee_pname) path_pre callee_pname path_post) )
           posts
     in
     List.map
       ~f:(fun (p, path) ->
-        post_process_post analysis_data callee_pname loc actual_pre (Prop.prop_sub split.sub p, path)
-        )
+        post_process_post analysis_data callee_pname loc actual_pre (Prop.prop_sub split.sub p, path) )
       posts'
   in
   L.d_increase_indent () ;
@@ -918,7 +916,9 @@ let mk_actual_precondition tenv prop actual_params formal_params =
   let mk_instantiation (formal_var, (actual_e, actual_t)) =
     Prop.mk_ptsto tenv (Exp.Lvar formal_var)
       (Eexp (actual_e, Predicates.inst_actual_precondition))
-      (Exp.Sizeof {typ= actual_t; nbytes= None; dynamic_length= None; subtype= Subtype.exact})
+      (Exp.Sizeof
+         {typ= actual_t; nbytes= None; dynamic_length= None; subtype= Subtype.exact; nullable= false}
+      )
   in
   let instantiated_formals = List.map ~f:mk_instantiation formals_actuals in
   let actual_pre = Prop.prop_sigma_star prop instantiated_formals in
@@ -1003,7 +1003,8 @@ let check_uninitialize_dangling_deref caller_pname tenv callee_pname actual_pre 
 
 let missing_sigma_need_adding_to_tenv tenv hpreds =
   let field_is_missing struc (field, _) =
-    not (List.exists struc.Struct.fields ~f:(fun (fname, _, _) -> Fieldname.equal fname field))
+    not
+      (List.exists struc.Struct.fields ~f:(fun {Struct.name= fname} -> Fieldname.equal fname field))
   in
   let missing_hpred_need_adding_to_tenv hpred =
     match hpred with

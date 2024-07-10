@@ -116,6 +116,8 @@ module TopLifted (Domain : S) : sig
   include WithTop with type t = Domain.t top_lifted
 
   val map : (Domain.t -> Domain.t) -> t -> t
+
+  val get : default:'a -> (Domain.t -> 'a) -> t -> 'a
 end
 
 module TopLiftedUtils : sig
@@ -233,7 +235,8 @@ include sig
 
   (** Lift a PPSet to a powerset domain ordered by subset. The elements of the set should be drawn
       from a *finite* collection of possible values, since the widening operator here is just union. *)
-  module FiniteSetOfPPSet (PPSet : PrettyPrintable.PPSet) : FiniteSetS with type elt = PPSet.elt
+  module FiniteSetOfPPSet (PPSet : PrettyPrintable.PPSet) :
+    FiniteSetS with type t = PPSet.t with type elt = PPSet.elt
 end
 
 (** Lift a set to a powerset domain ordered by subset. The elements of the set should be drawn from
@@ -312,7 +315,10 @@ include sig
 
     val remove_all : Key.t -> t -> t [@@warning "-unused-value-declaration"]
 
-    val get_all : Key.t -> t -> Value.t list
+    val find_all : Key.t -> t -> Value.t list
+
+    val find_fold : (Value.t -> 'a -> 'a) -> Key.t -> t -> 'a -> 'a
+    (** Fold over the values associated to one key *)
 
     val get_all_keys : t -> Key.t list
 

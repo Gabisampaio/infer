@@ -248,8 +248,11 @@ let rec validate_expr env (expr : Ast.expression) =
     | _ ->
         L.debug Capture Verbose "Invalid map association kind (not =>) in map comprehension@." ;
         false )
-  | Match {pattern; body} ->
+  | Match {pattern; body} | MaybeMatch {pattern; body} ->
+      (* TOOD: MaybeMatch must have Maybe as parent *)
       validate_pattern env pattern && validate_expr env body
+  | Maybe {body; else_cases} ->
+      validate_body env body && List.for_all ~f:(validate_case_clause env) else_cases
   | Nil ->
       true
   | Receive {cases; timeout} -> (

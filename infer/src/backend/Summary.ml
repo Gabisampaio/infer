@@ -48,7 +48,8 @@ type t =
   ; stats: Stats.t
   ; proc_name: Procname.t
   ; err_log: Errlog.t
-  ; mutable dependencies: Dependencies.t }
+  ; mutable dependencies: Dependencies.t
+  ; mutable is_complete_result: bool }
 
 let yojson_of_t {proc_name; payloads} = [%yojson_of: Procname.t * Payloads.t] (proc_name, payloads)
 
@@ -87,50 +88,81 @@ let pp_html source fmt ({err_log; payloads; stats} as summary) =
 
 
 module ReportSummary = struct
-  type t =
-    { loc: Location.t
-    ; cost_opt: CostDomain.summary option
-    ; config_impact_opt: ConfigImpactAnalysis.Summary.t option
-    ; err_log: Errlog.t }
+  type t = {loc: Location.t; err_log: Errlog.t}
 
-  let of_full_summary ({proc_name; payloads; err_log} : full_summary) : t =
-    { loc= (Attributes.load_exn proc_name).loc
-    ; cost_opt= Lazy.force payloads.Payloads.cost
-    ; config_impact_opt= Lazy.force payloads.Payloads.config_impact_analysis
-    ; err_log }
+  let of_err_log proc_name err_log = {loc= (Attributes.load_exn proc_name).loc; err_log}
 
+  let of_full_summary {proc_name; err_log} = of_err_log proc_name err_log
 
-  let empty () =
-    {loc= Location.dummy; cost_opt= None; config_impact_opt= None; err_log= Errlog.empty ()}
+  let empty () = {loc= Location.dummy; err_log= Errlog.empty ()}
 
+  let merge ~into x = Errlog.merge ~into:into.err_log x.err_log
 
-  module SQLite = SqliteUtils.MarshalledDataNOTForComparison (struct
-    type nonrec t = t
-  end)
+  module SQLite = struct
+    include SqliteUtils.MarshalledDataNOTForComparison (struct
+      type nonrec t = t
+    end)
+
+    let serialize report_summary =
+      let default = serialize report_summary in
+      fun ~old_report_summary ->
+        Option.value_map old_report_summary ~default ~f:(fun old_report_summary ->
+            match merge ~into:report_summary (deserialize old_report_summary) with
+            | `Modified ->
+                serialize report_summary
+            | `Intact ->
+                default )
+  end
 end
 
 module SummaryMetadata = struct
   type t =
-    {sessions: int; stats: Stats.t; proc_name: Procname.t; dependencies: Dependencies.complete}
+    { sessions: int
+    ; stats: Stats.t
+    ; proc_name: Procname.t
+    ; dependencies: Dependencies.complete
+    ; is_complete_result: bool }
   [@@deriving fields]
 
-  let of_full_summary (f : full_summary) : t =
+  let of_full_summary ~is_complete_result (f : full_summary) : t =
     { sessions= f.sessions
     ; stats= f.stats
     ; proc_name= f.proc_name
-    ; dependencies= Dependencies.complete_exn f.dependencies }
+    ; dependencies= Dependencies.complete_exn f.dependencies
+    ; is_complete_result }
 
 
   let empty proc_name =
     { sessions= 0
     ; stats= Stats.empty
     ; proc_name
-    ; dependencies= Dependencies.reset proc_name |> Dependencies.freeze proc_name }
+    ; dependencies= Dependencies.reset proc_name |> Dependencies.freeze proc_name
+    ; is_complete_result= false }
 
 
-  module SQLite = SqliteUtils.MarshalledDataNOTForComparison (struct
-    type nonrec t = t
-  end)
+  let merge x y =
+    let dependencies = Dependencies.merge x.dependencies y.dependencies in
+    let is_complete_result = x.is_complete_result || y.is_complete_result in
+    if phys_equal dependencies x.dependencies && Bool.equal is_complete_result x.is_complete_result
+    then x
+    else if
+      phys_equal dependencies y.dependencies && Bool.equal is_complete_result y.is_complete_result
+    then y
+    else {x with dependencies; is_complete_result}
+
+
+  module SQLite = struct
+    include SqliteUtils.MarshalledDataNOTForComparison (struct
+      type nonrec t = t
+    end)
+
+    let serialize summary_metadata =
+      let default = serialize summary_metadata in
+      fun ~old_summary_metadata ->
+        Option.value_map old_summary_metadata ~default ~f:(fun old_summary_metadata ->
+            let res = merge summary_metadata (deserialize old_summary_metadata) in
+            if phys_equal res summary_metadata then default else serialize res )
+  end
 end
 
 let mk_full_summary payloads (report_summary : ReportSummary.t)
@@ -140,23 +172,32 @@ let mk_full_summary payloads (report_summary : ReportSummary.t)
   ; stats= summary_metadata.stats
   ; proc_name= summary_metadata.proc_name
   ; dependencies= Dependencies.Complete summary_metadata.dependencies
-  ; err_log= report_summary.err_log }
+  ; err_log= report_summary.err_log
+  ; is_complete_result= summary_metadata.is_complete_result }
 
 
 module OnDisk = struct
-  type cache = t Procname.Hash.t
+  module Hash = Caml.Hashtbl.Make (struct
+    type t = Procname.t * AnalysisRequest.t [@@deriving equal, hash]
+  end)
 
-  let cache : cache = Procname.Hash.create 128
+  type cache = t Hash.t
 
-  let clear_cache () = Procname.Hash.clear cache
+  let cache : cache = Hash.create 128
+
+  let clear_cache () = Hash.clear cache
 
   (** Remove an element from the cache of summaries. Contrast to reset which re-initializes a
       summary keeping the same Procdesc and updates the cache accordingly. *)
-  let remove_from_cache pname = Procname.Hash.remove cache pname
+  let remove_from_cache pname =
+    Hash.filter_map_inplace
+      (fun (pname', _) v -> if Procname.equal pname pname' then None else Some v)
+      cache
+
 
   (** Add the summary to the table for the given function *)
-  let add (proc_name : Procname.t) (summary : t) : unit =
-    Procname.Hash.replace cache proc_name summary
+  let add proc_name analysis_req summary : unit =
+    Hash.replace cache (proc_name, analysis_req) summary
 
 
   let spec_of_procname, spec_of_model =
@@ -203,7 +244,7 @@ module OnDisk = struct
 
 
   (** Load procedure summary for the given procedure name and update spec table *)
-  let load_summary_to_spec_table ~lazy_payloads proc_name =
+  let load_summary_to_spec_table ~lazy_payloads analysis_req proc_name =
     let summ_opt =
       match spec_of_procname ~lazy_payloads proc_name with
       | None when BiabductionModels.mem proc_name ->
@@ -213,33 +254,55 @@ module OnDisk = struct
       | summ_opt ->
           summ_opt
     in
-    Option.iter ~f:(add proc_name) summ_opt ;
+    Option.iter ~f:(add proc_name analysis_req) summ_opt ;
     summ_opt
 
 
-  let get ~lazy_payloads proc_name =
-    match Procname.Hash.find cache proc_name with
+  let get ~lazy_payloads analysis_req proc_name =
+    let found_from_cache summary =
+      BStats.incr_summary_cache_hits () ;
+      Some summary
+    in
+    let not_found_from_cache () =
+      BStats.incr_summary_cache_misses () ;
+      load_summary_to_spec_table ~lazy_payloads analysis_req proc_name
+    in
+    match Hash.find cache (proc_name, analysis_req) with
     | summary ->
-        BStats.incr_summary_cache_hits () ;
-        Some summary
-    | exception Caml.Not_found ->
-        BStats.incr_summary_cache_misses () ;
-        load_summary_to_spec_table ~lazy_payloads proc_name
+        found_from_cache summary
+    | exception Caml.Not_found -> (
+      match (analysis_req : AnalysisRequest.t) with
+      | All ->
+          (* We already tried to find the cache for [All]. *)
+          not_found_from_cache ()
+      | One _ | CheckerWithoutPayload _ -> (
+        (* If there is a cache for [All], we use it. *)
+        match Hash.find cache (proc_name, analysis_req) with
+        | summary ->
+            found_from_cache summary
+        | exception Caml.Not_found ->
+            not_found_from_cache () ) )
 
 
   (** Save summary for the procedure into the spec database *)
-  let rec store ({proc_name; dependencies; payloads} as summary : t) =
+  let rec store (analysis_req : AnalysisRequest.t)
+      ({proc_name; dependencies; payloads} as summary : t) =
     (* Make sure the summary in memory is identical to the saved one *)
-    add proc_name summary ;
+    add proc_name analysis_req summary ;
     summary.dependencies <- Dependencies.(Complete (freeze proc_name dependencies)) ;
     let report_summary = ReportSummary.of_full_summary summary in
-    let summary_metadata = SummaryMetadata.of_full_summary summary in
+    let summary_metadata =
+      let is_complete_result =
+        match analysis_req with All -> true | One _ | CheckerWithoutPayload _ -> false
+      in
+      SummaryMetadata.of_full_summary ~is_complete_result summary
+    in
     try
-      DBWriter.store_spec ~proc_uid:(Procname.to_unique_id proc_name)
+      DBWriter.store_spec analysis_req ~proc_uid:(Procname.to_unique_id proc_name)
         ~proc_name:(Procname.SQLite.serialize proc_name)
-        ~payloads:(Payloads.SQLite.serialize payloads)
-        ~report_summary:(ReportSummary.SQLite.serialize report_summary)
-        ~summary_metadata:(SummaryMetadata.SQLite.serialize summary_metadata) ;
+        ~merge_pulse_payload:(Payloads.SQLite.serialize payloads)
+        ~merge_report_summary:(ReportSummary.SQLite.serialize report_summary)
+        ~merge_summary_metadata:(SummaryMetadata.SQLite.serialize summary_metadata) ;
       summary
     with SqliteUtils.DataTooBig ->
       (* Serialization exceeded size limits, write and return an empty summary  *)
@@ -250,19 +313,20 @@ module OnDisk = struct
       let report_summary = ReportSummary.empty () in
       let summary_metadata = SummaryMetadata.empty proc_name in
       let new_summary = mk_full_summary payloads report_summary summary_metadata in
-      store new_summary
+      store analysis_req new_summary
 
 
-  let reset proc_name =
+  let reset proc_name analysis_req =
     let summary =
       { sessions= 0
       ; payloads= Payloads.empty
       ; stats= Stats.empty
       ; proc_name
       ; err_log= Errlog.empty ()
-      ; dependencies= Dependencies.reset proc_name }
+      ; dependencies= Dependencies.reset proc_name
+      ; is_complete_result= false }
     in
-    Procname.Hash.replace cache proc_name summary ;
+    Hash.replace cache (proc_name, analysis_req) summary ;
     summary
 
 
@@ -297,13 +361,23 @@ module OnDisk = struct
     let db = Database.get_database AnalysisDatabase in
     let dummy_source_file = SourceFile.invalid __FILE__ in
     (* NB the order is deterministic, but it is over a serialised value, so it is arbitrary *)
-    Sqlite3.prepare db "SELECT proc_name, report_summary FROM specs ORDER BY proc_uid ASC"
+    Printf.sprintf "SELECT proc_name, report_summary, %s, %s FROM specs ORDER BY proc_uid ASC"
+      PayloadId.Variants.cost.Variant.name PayloadId.Variants.configimpactanalysis.Variant.name
+    |> Sqlite3.prepare db
     |> Container.iter ~fold:(SqliteUtils.result_fold_rows db ~log:"iter over filtered specs")
          ~f:(fun stmt ->
            let proc_name = Sqlite3.column stmt 0 |> Procname.SQLite.deserialize in
            if filter dummy_source_file proc_name then
-             let ({loc; cost_opt; config_impact_opt; err_log} : ReportSummary.t) =
+             let {ReportSummary.loc; err_log} =
                Sqlite3.column stmt 1 |> ReportSummary.SQLite.deserialize
+             in
+             let cost_opt : CostDomain.summary option =
+               Sqlite3.column stmt 2 |> Payloads.SQLite.deserialize_payload_opt
+               |> ILazy.force_option
+             in
+             let config_impact_opt : ConfigImpactAnalysis.Summary.t option =
+               Sqlite3.column stmt 3 |> Payloads.SQLite.deserialize_payload_opt
+               |> ILazy.force_option
              in
              f proc_name loc cost_opt config_impact_opt err_log )
 
@@ -327,4 +401,16 @@ module OnDisk = struct
     Sqlite3.prepare db "SELECT count(1) FROM specs"
     |> SqliteUtils.result_single_column_option db ~log:"count specs"
     |> function Some count -> Sqlite3.Data.to_int_exn count | _ -> 0
+
+
+  let add_errlog proc_name err_log =
+    (* Make sure the summary in memory gets the updated err_log *)
+    Hash.find_opt cache (proc_name, AnalysisRequest.all)
+    |> Option.iter ~f:(fun summary ->
+           (* side-effects galore! no need to do anything except run [Errlog.merge] to update all
+              existing copies of this summary's error log *)
+           Errlog.merge ~into:summary.err_log err_log |> ignore ) ;
+    let report_summary = ReportSummary.of_err_log proc_name err_log in
+    DBWriter.update_report_summary ~proc_uid:(Procname.to_unique_id proc_name)
+      ~merge_report_summary:(ReportSummary.SQLite.serialize report_summary)
 end

@@ -109,15 +109,16 @@ let rec create_struct_values analysis_data pname tenv orig_prop footprint_part k
     | Tstruct name, Off_fld (f, _) :: off' -> (
       match Tenv.lookup tenv name with
       | Some ({fields; statics} as struct_typ) -> (
-        match List.find ~f:(fun (f', _, _) -> Fieldname.equal f f') (fields @ statics) with
-        | Some (_, t', _) ->
+        match List.find ~f:(fun {Struct.name= f'} -> Fieldname.equal f f') (fields @ statics) with
+        | Some {Struct.typ= t'} ->
             let atoms', se', res_t' =
               create_struct_values analysis_data pname tenv orig_prop footprint_part kind max_stamp
                 t' off' inst
             in
             let se = Predicates.Estruct ([(f, se')], inst) in
-            let replace_typ_of_f (f', t', a') =
-              if Fieldname.equal f f' then (f, res_t', a') else (f', t', a')
+            let replace_typ_of_f {Struct.name= f'; typ= t'; annot= a'} =
+              if Fieldname.equal f f' then Struct.mk_field f res_t' ~annot:a'
+              else Struct.mk_field f' t' ~annot:a'
             in
             let fields' =
               List.sort ~compare:Struct.compare_field (List.map ~f:replace_typ_of_f fields)
@@ -164,8 +165,8 @@ let rec create_struct_values analysis_data pname tenv orig_prop footprint_part k
         (* In this case, we lift t to the t array. *)
         let t', mk_typ_f =
           match t.Typ.desc with
-          | Typ.Tptr (t', _) -> (
-              (t', function desc -> Typ.mk ~default:t desc) )
+          | Typ.Tptr (t', _) ->
+              (t', function desc -> Typ.mk ~default:t desc)
           | _ ->
               (t, fun desc -> Typ.mk desc)
         in
@@ -215,8 +216,8 @@ let rec strexp_extend_values_ analysis_data pname tenv orig_prop footprint_part 
   | Off_fld (f, _) :: off', Predicates.Estruct (fsel, inst'), Tstruct name -> (
     match Tenv.lookup tenv name with
     | Some ({fields; statics} as struct_typ) -> (
-      match List.find ~f:(fun (f', _, _) -> Fieldname.equal f f') (fields @ statics) with
-      | Some (_, typ', _) -> (
+      match List.find ~f:(fun {Struct.name= f'} -> Fieldname.equal f f') (fields @ statics) with
+      | Some {Struct.typ= typ'} -> (
         match List.find ~f:(fun (f', _) -> Fieldname.equal f f') fsel with
         | Some (_, se') ->
             let atoms_se_typ_list' =
@@ -231,8 +232,8 @@ let rec strexp_extend_values_ analysis_data pname tenv orig_prop footprint_part 
                 List.sort ~compare:[%compare: Fieldname.t * Predicates.strexp]
                   (List.map ~f:replace_fse fsel)
               in
-              let replace_fta ((f1, _, a1) as fta1) =
-                if Fieldname.equal f f1 then (f1, res_typ', a1) else fta1
+              let replace_fta ({Struct.name= f1; annot= a1} as fta1) =
+                if Fieldname.equal f f1 then Struct.mk_field f1 res_typ' ~annot:a1 else fta1
               in
               let fields' =
                 List.sort ~compare:Struct.compare_field (List.map ~f:replace_fta fields)
@@ -249,8 +250,9 @@ let rec strexp_extend_values_ analysis_data pname tenv orig_prop footprint_part 
             let res_fsel' =
               List.sort ~compare:[%compare: Fieldname.t * Predicates.strexp] ((f, se') :: fsel)
             in
-            let replace_fta (f', t', a') =
-              if Fieldname.equal f' f then (f, res_typ', a') else (f', t', a')
+            let replace_fta {Struct.name= f'; typ= t'; annot= a'} =
+              if Fieldname.equal f' f then Struct.mk_field f res_typ' ~annot:a'
+              else Struct.mk_field f' t' ~annot:a'
             in
             let fields' =
               List.sort ~compare:Struct.compare_field (List.map ~f:replace_fta fields)
@@ -438,7 +440,11 @@ let strexp_extend_values analysis_data pname tenv orig_prop footprint_part kind 
     | Exp.Sizeof sizeof_data ->
         sizeof_data
     | _ ->
-        {Exp.typ= StdTyp.void; nbytes= None; dynamic_length= None; subtype= Subtype.exact}
+        { Exp.typ= StdTyp.void
+        ; nbytes= None
+        ; dynamic_length= None
+        ; subtype= Subtype.exact
+        ; nullable= false }
   in
   List.map
     ~f:(fun (atoms', se', typ') ->
@@ -492,23 +498,23 @@ let mk_ptsto_exp_footprint analysis_data pname tenv orig_prop (lexp, typ) max_st
         ( []
         , Prop.mk_ptsto tenv root
             (Predicates.Eexp (fun_exp, inst))
-            (Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype}) )
+            (Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype; nullable= false}) )
     | _, [], Typ.Tfun ->
         let atoms, se, typ =
           create_struct_values analysis_data pname tenv orig_prop footprint_part Ident.kfootprint
             max_stamp typ off0 inst
         in
         ( atoms
-        , Prop.mk_ptsto tenv root se (Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype})
-        )
+        , Prop.mk_ptsto tenv root se
+            (Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype; nullable= false}) )
     | _ ->
         let atoms, se, typ =
           create_struct_values analysis_data pname tenv orig_prop footprint_part Ident.kfootprint
             max_stamp typ off0 inst
         in
         ( atoms
-        , Prop.mk_ptsto tenv root se (Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype})
-        )
+        , Prop.mk_ptsto tenv root se
+            (Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype; nullable= false}) )
   in
   let atoms, ptsto_foot = create_ptsto true off_foot in
   let sub = Predicates.subst_of_list eqs in

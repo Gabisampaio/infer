@@ -9,6 +9,8 @@ open! IStd
 module L = Logging
 module Domain = StarvationDomain
 
+let analysis_req = AnalysisRequest.one Starvation
+
 let iter_scheduled_pair (work_item : Domain.ScheduledWorkItem.t) f =
   let open Domain in
   let callsite = CallSite.make work_item.procname work_item.loc in
@@ -23,20 +25,28 @@ let iter_critical_pairs_of_summary f summary =
 
 
 let iter_critical_pairs_of_scheduled_work f (work_item : Domain.ScheduledWorkItem.t) =
-  Summary.OnDisk.get ~lazy_payloads:true work_item.procname
-  |> Option.bind ~f:(fun (summary : Summary.t) -> Lazy.force summary.payloads.starvation)
+  Summary.OnDisk.get ~lazy_payloads:true analysis_req work_item.procname
+  |> Option.bind ~f:(fun (summary : Summary.t) -> ILazy.force_option summary.payloads.starvation)
   |> Option.iter ~f:(iter_critical_pairs_of_summary (iter_scheduled_pair work_item f))
+
+
+let should_report tenv procname =
+  match (procname : Procname.t) with
+  | Java _ ->
+      StarvationModels.is_java_main_method procname
+      || ConcurrencyModels.is_android_lifecycle_method tenv procname
+  | C _ ->
+      true
+  | Block _ | CSharp _ | Erlang _ | Hack _ | ObjC_Cpp _ | Python _ ->
+      false
 
 
 let iter_summary ~f exe_env ({payloads; proc_name} : Summary.t) =
   let open Domain in
-  Payloads.starvation payloads |> Lazy.force
+  Payloads.starvation payloads |> ILazy.force_option
   |> Option.iter ~f:(fun (payload : summary) ->
          let tenv = Exe_env.get_proc_tenv exe_env proc_name in
-         if
-           StarvationModels.is_java_main_method proc_name
-           || ConcurrencyModels.is_android_lifecycle_method tenv proc_name
-         then iter_critical_pairs_of_summary (f proc_name) payload ;
+         if should_report tenv proc_name then iter_critical_pairs_of_summary (f proc_name) payload ;
          ScheduledWorkDomain.iter
            (iter_critical_pairs_of_scheduled_work (f proc_name))
            payload.scheduled_work )
@@ -61,17 +71,25 @@ end
 
 let report exe_env work_set =
   let open Domain in
+  let task_bar = TaskBar.create ~jobs:1 in
+  let to_do_items = ref (WorkHashSet.length work_set) in
+  TaskBar.set_tasks_total task_bar !to_do_items ;
   let wrap_report (procname, (pair : CriticalPair.t)) init =
-    Summary.OnDisk.get ~lazy_payloads:true procname
+    to_do_items := !to_do_items - 1 ;
+    TaskBar.set_remaining_tasks task_bar !to_do_items ;
+    TaskBar.update_status task_bar ~slot:0 (Mtime_clock.now ()) (Procname.to_string procname) ;
+    TaskBar.refresh task_bar ;
+    Summary.OnDisk.get ~lazy_payloads:true analysis_req procname
     |> Option.fold ~init ~f:(fun acc summary ->
            let pattrs = Attributes.load_exn procname in
            let tenv = Exe_env.get_proc_tenv exe_env procname in
            let acc =
              Starvation.report_on_pair
                ~analyze_ondemand:(fun pname ->
-                 Ondemand.analyze_proc_name exe_env ~caller_summary:summary pname
-                 |> Option.bind ~f:(fun summary -> Lazy.force summary.Summary.payloads.starvation)
-                 )
+                 Ondemand.analyze_proc_name exe_env analysis_req ~caller_summary:summary pname
+                 |> AnalysisResult.to_option
+                 |> Option.bind ~f:(fun summary ->
+                        ILazy.force_option summary.Summary.payloads.starvation ) )
                tenv pattrs pair acc
            in
            Event.get_acquired_locks pair.elem.event
@@ -86,7 +104,8 @@ let report exe_env work_set =
                     work_set acc ) )
   in
   WorkHashSet.fold wrap_report work_set Starvation.ReportMap.empty
-  |> Starvation.ReportMap.store_multi_file
+  |> Starvation.ReportMap.store_multi_file ;
+  TaskBar.finish task_bar
 
 
 let whole_program_analysis () =
@@ -95,6 +114,7 @@ let whole_program_analysis () =
   let exe_env = Exe_env.mk () in
   L.progress "Processing on-disk summaries...@." ;
   Summary.OnDisk.iter_specs ~f:(iter_summary exe_env ~f:(WorkHashSet.add_pair work_set)) ;
-  L.progress "Loaded %d pairs@." (WorkHashSet.length work_set) ;
+  let num_pairs = WorkHashSet.length work_set in
+  L.progress "Loaded %d pairs@." num_pairs ;
   L.progress "Reporting on processed summaries...@." ;
   report exe_env work_set

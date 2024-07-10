@@ -44,32 +44,40 @@ let interprocedural_with_field_dependency ~dep_field payload_field checker =
     [payload_field1] *)
 let interprocedural2 payload_field1 payload_field2 checker =
   Procedure
-    (CallbackOfChecker.interprocedural ~f_analyze_dep:Option.some
+    (CallbackOfChecker.interprocedural
+       (Payloads.analysis_request_of_field payload_field1)
+       ~f_analyze_dep:Option.some
        ~get_payload:(fun payloads ->
-         ( Field.get payload_field1 payloads |> Lazy.force
-         , Field.get payload_field2 payloads |> Lazy.force ) )
+         ( Field.get payload_field1 payloads |> ILazy.force_option
+         , Field.get payload_field2 payloads |> ILazy.force_option ) )
        ~set_payload:(fun payloads payload1 -> Field.fset payload_field1 payloads payload1)
        checker )
 
 
 (** For checkers that read three separate payloads. *)
-let interprocedural3 payload_field1 payload_field2 payload_field3 ~set_payload checker =
+let interprocedural3 ?checker_without_payload payload_field1 payload_field2 payload_field3
+    ~set_payload checker =
+  let analysis_req =
+    (* Use the first payload [payload_field1] as [analysis_req], similar to the other constructs,
+       unless the optional [checker_without_payload] value is explicitly given. *)
+    match checker_without_payload with
+    | None ->
+        Payloads.analysis_request_of_field payload_field1
+    | Some checker ->
+        AnalysisRequest.checker_without_payload checker
+  in
   Procedure
-    (CallbackOfChecker.interprocedural ~f_analyze_dep:Option.some
+    (CallbackOfChecker.interprocedural analysis_req ~f_analyze_dep:Option.some
        ~get_payload:(fun payloads ->
-         ( Field.get payload_field1 payloads |> Lazy.force
-         , Field.get payload_field2 payloads |> Lazy.force
-         , Field.get payload_field3 payloads |> Lazy.force ) )
+         ( Field.get payload_field1 payloads |> ILazy.force_option
+         , Field.get payload_field2 payloads |> ILazy.force_option
+         , Field.get payload_field3 payloads |> ILazy.force_option ) )
        ~set_payload checker )
 
 
 let file payload_field checker = File (CallbackOfChecker.interprocedural_file payload_field checker)
 
 let intraprocedural checker = Procedure (CallbackOfChecker.intraprocedural checker)
-
-let intraprocedural_with_payload payload_field checker =
-  Procedure (CallbackOfChecker.intraprocedural_with_field payload_field checker)
-
 
 let intraprocedural_with_field_dependency payload_field checker =
   Procedure (CallbackOfChecker.intraprocedural_with_field_dependency payload_field checker)
@@ -121,11 +129,11 @@ let all_checkers =
   ; { checker= LoopHoisting
     ; callbacks=
         (let hoisting =
-           interprocedural3
-             ~set_payload:(fun payloads (_ : unit Lazy.t) ->
+           interprocedural3 ~checker_without_payload:LoopHoisting
+             ~set_payload:(fun payloads (_ : unit Lazy.t option) ->
                (* this analysis doesn't produce additional payloads *) payloads )
              Payloads.Fields.buffer_overrun_analysis Payloads.Fields.purity Payloads.Fields.cost
-             Hoisting.checker
+             (fun analysis_data -> Some (Hoisting.checker analysis_data))
          in
          [(hoisting, Clang); (hoisting, Java)] ) }
   ; { checker= Cost
@@ -135,7 +143,6 @@ let all_checkers =
              Payloads.Fields.buffer_overrun_analysis Payloads.Fields.purity Cost.checker
          in
          [(checker, Clang); (checker, Java); (checker, Hack)] ) }
-  ; {checker= Uninit; callbacks= [(interprocedural Payloads.Fields.uninit Uninit.checker, Clang)]}
   ; {checker= SIOF; callbacks= [(interprocedural Payloads.Fields.siof Siof.checker, Clang)]}
   ; { checker= LithoRequiredProps
     ; callbacks= [(interprocedural Payloads.Fields.litho_required_props RequiredProps.checker, Java)]
@@ -157,10 +164,6 @@ let all_checkers =
          ; (racerd_file, Clang)
          ; (racerd_file, Java)
          ; (racerd_file, CIL) ] ) }
-  ; { checker= Quandary
-    ; callbacks=
-        [ (interprocedural Payloads.Fields.quandary JavaTaintAnalysis.checker, Java)
-        ; (interprocedural Payloads.Fields.quandary ClangTaintAnalysis.checker, Clang) ] }
   ; { checker= DisjunctiveDemo
     ; callbacks= [(interprocedural Payloads.Fields.disjunctive_demo DisjunctiveDemo.checker, Clang)]
     }
@@ -176,10 +179,6 @@ let all_checkers =
          ; (pulse, Java)
          ; (pulse, CIL)
          ; (pulse, Python) ] ) }
-  ; { checker= Datalog
-    ; callbacks=
-        (let datalog = intraprocedural DatalogAnalysis.checker in
-         [(datalog, Java)] ) }
   ; { checker= Impurity
     ; callbacks=
         (let impurity =
@@ -190,16 +189,9 @@ let all_checkers =
   ; {checker= Liveness; callbacks= [(intraprocedural Liveness.checker, Clang)]}
   ; { checker= InefficientKeysetIterator
     ; callbacks= [(intraprocedural InefficientKeysetIterator.checker, Java)] }
-  ; { checker= ImmutableCast
-    ; callbacks=
-        [(intraprocedural_with_payload Payloads.Fields.nullsafe ImmutableChecker.analyze, Java)] }
   ; { checker= FragmentRetainsView
     ; callbacks= [(intraprocedural FragmentRetainsViewChecker.callback_fragment_retains_view, Java)]
     }
-  ; { checker= Eradicate
-    ; callbacks=
-        [ (intraprocedural_with_payload Payloads.Fields.nullsafe Eradicate.analyze_procedure, Java)
-        ; (file Payloads.Fields.nullsafe FileLevelAnalysis.analyze_file, Java) ] }
   ; { checker= Biabduction
     ; callbacks=
         (let biabduction =
@@ -248,6 +240,9 @@ let get_active_checkers () =
 
 let register checkers =
   let register_one {checker; callbacks} =
+    Logging.debug Analysis Verbose "Register checker %s that depends on %a.@."
+      (Checker.get_id checker) Checker.Set.pp
+      (Checker.get_dependencies checker) ;
     let register_callback (callback, language) =
       match callback with
       | Procedure procedure_cb ->

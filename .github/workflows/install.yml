@@ -54,6 +54,7 @@ jobs:
       matrix:
         os:
           - macOS-latest
+          - macOS-13
           - ubuntu-latest
         ocaml-compiler:
           - ocaml-variants.4.14.0+options,ocaml-option-flambda
@@ -77,7 +78,7 @@ jobs:
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
-          java-version: '8'
+          java-version: '11'
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -99,14 +100,14 @@ jobs:
       - name: Compute hash of clang installation
         id: clang-hash
         run: |
-          echo "::set-output name=value::$(./facebook-clang-plugins/clang/setup.sh --clang-hash)"
+          echo "value=$(./facebook-clang-plugins/clang/setup.sh --clang-hash)" >> $GITHUB_OUTPUT
 
       - name: Attempt to get clang from the cache
         id: cache-clang
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: facebook-clang-plugins/clang/install
-          key: clang-${{ runner.os }}-${{ steps.clang-hash.outputs.value }}
+          key: clang-${{ runner.os }}-${{ runner.arch }}-${{ steps.clang-hash.outputs.value }}
 
       - name: Record that the clang cache was hit
         if: steps.cache-clang.outputs.cache-hit == 'true'
@@ -124,14 +125,10 @@ jobs:
       - if: runner.os == 'macOS'
         run: ./build-infer.sh --yes --user-opam-switch -- --disable-python-analyzers
 
-      - run: make install BUILD_MODE=opt
-        if: runner.os == 'macOS'
-
       - name: Install ocamlformat
         run: |
-          opam pin $(cat opam/ocamlformat) --no-action
           opam install --deps-only --locked opam/ocamlformat.opam.locked
-          opam install ocamlformat
+          opam install ocamlformat.$(grep -e '^version:' ./opam/ocamlformat.opam.locked | cut -d ' ' -f 2 | tr -d \")
           opam exec -- ocamlformat --version
 
       - name: Test infer
@@ -140,8 +137,7 @@ jobs:
       - run: |
           sudo make install BUILD_MODE=opt
           # restore permissions after root build
-          sudo chown $USER: -R .
-        if: runner.os == 'Linux'
+          sudo chown -R $USER: .
 
       - name: Build release tarball
         id: build-release

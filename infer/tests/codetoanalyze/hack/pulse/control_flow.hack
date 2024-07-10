@@ -5,9 +5,13 @@
 
 namespace ControlFlow;
 
-class SensitiveClass {
-  public function __construct(public $flag) {}
+class Foo {}
+
+class MyMixed {
+  public function __construct(public bool $flag) {}
 }
+
+class SensitiveClass extends MyMixed {}
 
 function typeCheckDoesntConfuseTheAnalysis_maintainsTaint_Bad(
   mixed $arg1,
@@ -41,10 +45,9 @@ function nullsafeAccessNullOk(): void {
 }
 
 // Checking handling of `is (non)null
-
-function logWhenNonnull(?mixed $arg): void {
+function logWhenNonnull(?MyMixed $arg): void {
   if ($arg is nonnull) {
-    \Level1\taintSink($arg->data);
+    \Level1\taintSink($arg->flag);
   }
 }
 
@@ -95,10 +98,7 @@ function loggingSensitiveViaCBad(SensitiveClass $sc, mixed $carrier): void {
   }
 }
 
-function FP_notLoggingSensitiveViaDOk(
-  SensitiveClass $sc,
-  mixed $carrier,
-): void {
+function notLoggingSensitiveViaDOk(SensitiveClass $sc, mixed $carrier): void {
   if ($carrier is D) {
     $carrier->data = $sc;
     logWhenC($carrier);

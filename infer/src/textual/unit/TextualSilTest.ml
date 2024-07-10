@@ -50,12 +50,14 @@ let%expect_test "undefined types are included in tenv" =
          supers: {}
          objc_protocols: {}
          methods: {
+                     Foo.f
                      Foo.f#2
                    }
          exported_obj_methods: {}
          annots: {<>}
          class_info: {HackClassInfo (Class)}
          dummy: false
+         source_file: dummy.sil
          hack Quux
          fields: {}
          statics: {}
@@ -82,6 +84,7 @@ let%expect_test "undefined types are included in tenv" =
          supers: {}
          objc_protocols: {}
          methods: {
+                     Bar.f
                      Bar.f#0
                    }
          exported_obj_methods: {}
@@ -113,6 +116,7 @@ let%expect_test "final annotation" =
       annots: {<_final>}
       class_info: {HackClassInfo (Class)}
       dummy: false
+      source_file: dummy.sil
       hack Bar
       fields: {}
       statics: {}
@@ -122,7 +126,45 @@ let%expect_test "final annotation" =
       exported_obj_methods: {}
       annots: {<>}
       class_info: {HackClassInfo (Class)}
-      dummy: false |}]
+      dummy: false
+      source_file: dummy.sil |}]
+
+
+let%expect_test "abstract class" =
+  let source =
+    {|
+          .source_language = "hack"
+          type Foo .abstract {}
+          type Bar {}
+          |}
+  in
+  let m = parse_module source in
+  let _, tenv = TextualSil.module_to_sil m in
+  F.printf "%a@\n" Tenv.pp tenv ;
+  [%expect
+    {|
+      hack Foo
+      fields: {}
+      statics: {}
+      supers: {}
+      objc_protocols: {}
+      methods: {}
+      exported_obj_methods: {}
+      annots: {<>}
+      class_info: {HackClassInfo (AbstractClass)}
+      dummy: false
+      source_file: dummy.sil
+      hack Bar
+      fields: {}
+      statics: {}
+      supers: {}
+      objc_protocols: {}
+      methods: {}
+      exported_obj_methods: {}
+      annots: {<>}
+      class_info: {HackClassInfo (Class)}
+      dummy: false
+      source_file: dummy.sil |}]
 
 
 let%expect_test "unknown formal calls" =
@@ -158,7 +200,7 @@ let%expect_test "unknown formal calls" =
         ; proc_id= foo#2 }
             #n1:
 
-            #n3:
+            #n4:
               n$0=*&x:HackMixed* [line 8, column 11];
               n$1=_fun_unknown(n$0:HackMixed*) [line 9, column 11];
               n$2=*&y:HackMixed* [line 10, column 11];
@@ -192,7 +234,7 @@ let%expect_test "hack extends is ordered" =
   let supers = Tenv.fold_supers tenv name ~init:[] ~f:(fun name _ acc -> name :: acc) in
   F.printf "%a@\n" (Fmt.list ~sep:(Fmt.any " ") IR.Typ.Name.pp) (List.rev supers) ;
   [%expect {|
-    hack A hack T3 hack T2 hack T1 hack T0 hack P3 hack P2 hack P1 hack P0 |}]
+    hack A hack T0 hack T1 hack T2 hack T3 hack P0 hack P1 hack P2 hack P3 |}]
 
 
 let%expect_test "overloads in tenv" =
@@ -214,8 +256,9 @@ let%expect_test "overloads in tenv" =
     supers: {}
     objc_protocols: {}
     methods: {
-                C.f#2
+                C.f
                 C.f#1
+                C.f#2
               }
     exported_obj_methods: {}
     annots: {<>}
@@ -281,6 +324,7 @@ let%expect_test "undefined + overloads in merged tenv" =
     supers: {}
     objc_protocols: {}
     methods: {
+                Dep.f
                 Dep.f#1
                 Dep.f#2
               }
@@ -324,15 +368,15 @@ let%expect_test "instanceof translation" =
     ; proc_id= bar#0 }
         #n1:
 
-        #n3:
+        #n4:
           n$0=_fun_foo() [line 7, column 9];
 
-        #n4:
-          n$1=_fun___instanceof(n$0:void*,sizeof(t=HackBool*):void) [line 10, column 9];
+        #n5:
+          n$1=_fun___instanceof(n$0:void*,sizeof(t=HackBool*;nullable=false):void) [line 10, column 9];
           *&return:int=n$1 [line 11, column 9];
 
-        #n5:
-          n$2=_fun___instanceof(n$0:void*,sizeof(t=HackBool*):void) [line 13, column 9];
+        #n6:
+          n$2=_fun___instanceof(n$0:void*,sizeof(t=HackBool*;nullable=false):void) [line 13, column 9];
           *&return:int=n$2 [line 13, column 9];
 
         #n2: |}]
@@ -362,6 +406,7 @@ let%expect_test "trait vs class kind" =
       annots: {<>}
       class_info: {HackClassInfo (Class)}
       dummy: false
+      source_file: dummy.sil
       hack T
       fields: {}
       statics: {}
@@ -371,7 +416,8 @@ let%expect_test "trait vs class kind" =
       exported_obj_methods: {}
       annots: {<>}
       class_info: {HackClassInfo (Trait)}
-      dummy: false |}]
+      dummy: false
+      source_file: dummy.sil |}]
 
 
 let%expect_test "const" =
@@ -410,4 +456,5 @@ let%expect_test "const" =
     exported_obj_methods: {}
     annots: {<>}
     class_info: {HackClassInfo (Class)}
-    dummy: false |}]
+    dummy: false
+    source_file: dummy.sil |}]

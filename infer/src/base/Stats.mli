@@ -42,6 +42,14 @@ val add_pulse_interrupted_loops : int -> unit
 
 val incr_pulse_summaries_contradictions : unit -> unit
 
+val incr_pulse_summaries_unsat_for_caller : unit -> unit
+
+val incr_pulse_summaries_with_some_unreachable_nodes : unit -> unit
+
+val incr_pulse_summaries_with_some_unreachable_returns : unit -> unit
+
+val incr_pulse_summaries_count_0_continue_program : unit -> unit
+
 val add_pulse_summaries_count : int -> unit
 
 val add_proc_duration_us : string -> string -> int -> unit
@@ -51,6 +59,12 @@ val incr_topl_reachable_calls : unit -> unit
 val incr_timeouts : unit -> unit
 
 val add_timing : Timeable.t -> float -> unit
+
+val set_process_times : ExecutionDuration.t -> unit
+
+val set_useful_times : ExecutionDuration.t -> unit
+
+val incr_spec_store_times : ExecutionDuration.counter -> unit
 
 val reset : unit -> unit
 (** reset all stats *)

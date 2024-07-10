@@ -12,14 +12,14 @@ AC_PREREQ([2.63])
 # - the values below
 # - opam
 AC_INIT([Infer],
-        [1.1.0],
+        [1.2.0],
         [https://github.com/facebook/infer/issues/])
 
 AC_CONFIG_SRCDIR([infer/src/istd/IStd.ml])
 
 # WARNING: keep in sync with above
 INFER_MAJOR=1
-INFER_MINOR=1
+INFER_MINOR=2
 INFER_PATCH=0
 
 AC_SUBST([INFER_MAJOR])
@@ -36,13 +36,10 @@ AC_CHECK_FILE([.facebook], [is_facebook_tree=yes], [is_facebook_tree=no])
 IS_FACEBOOK_TREE=$is_facebook_tree
 AC_SUBST([IS_FACEBOOK_TREE])
 
-AC_ARG_ENABLE(opam-pin-ocamlformat,
-  AS_HELP_STRING([--disable-opam-pin-ocamlformat],
-    [do not pin ocamlformat to the right version using opam and use the already-installed ocamlformat instead]),
-  ,
-  enable_opam_pin_ocamlformat=yes,)
-OPAM_PIN_OCAMLFORMAT=$enable_opam_pin_ocamlformat
-AC_SUBST([OPAM_PIN_OCAMLFORMAT])
+# are we in git repo
+AC_CHECK_FILE([.git], [is_git_repo=yes], [is_git_repo=no])
+IS_GIT_REPO=$is_git_repo
+AC_SUBST([IS_GIT_REPO])
 
 AC_ARG_VAR([PATH], [the shell's $PATH list of directories to search for executables])
 
@@ -85,6 +82,11 @@ case "${OS}" in
 esac
 AC_MSG_RESULT([$BUILD_PLATFORM])
 AC_SUBST([BUILD_PLATFORM])
+
+AC_MSG_CHECKING([for build cpu])
+[BUILD_CPU=`uname -m`]
+AC_MSG_RESULT([$BUILD_CPU])
+AC_SUBST([BUILD_CPU])
 
 AC_MSG_CHECKING([for Windows build])
 AS_IF([test x"$BUILD_PLATFORM" = x"Windows"], [WINDOWS_BUILD=yes])
@@ -197,6 +199,9 @@ AS_IF([test "x$enable_python_analyzers" != "xno"], [
   esac
 ]) # end if($enable_python_analyzers)
 
+AC_ARG_VAR([PYTHONHOME], [the location of the standard Python libraries])
+AC_SUBST([PYTHONHOME])
+
 AC_CHECK_TOOL([XCODE_SELECT], [xcode-select], [no])
 AS_IF([test "x$XCODE_SELECT" != "xno"], [XCODE_SELECT_OUT=`xcode-select -p`])
 
@@ -294,12 +299,7 @@ AC_ASSERT_OCAML_PKG([oUnit])
 AC_CHECK_TOOL([UTOP], [utop], [no])
 AC_ASSERT_OCAML_PKG([yojson])
 
-AC_MSG_CHECKING([which ocamlformat to use])
-AS_IF([test x"$is_facebook_tree" = x"yes"],
-  [OCAMLFORMAT="$(pwd)"/facebook/dependencies/bin/ocamlformat],
-  [OCAMLFORMAT=ocamlformat])
-AC_MSG_RESULT([$OCAMLFORMAT])
-AC_SUBST([OCAMLFORMAT])
+AC_CHECK_TOOL([OCAMLFORMAT], [ocamlformat], [no])
 
 AC_ARG_VAR([CPATH], [Additional directories to search for C headers.])
 AC_ARG_VAR([LIBRARY_PATH], [Additional directories to search for C shared objects.])
@@ -317,7 +317,7 @@ AS_IF([test "$OPAM" != "no"], [
     *) AC_MSG_ERROR([opam version $opam_version is not supported, please install opam version 2 instead]); break;;
   esac
   AC_MSG_CHECKING([current opam root])
-  OPAMROOT=$("$OPAM" config var root)
+  OPAMROOT=$("$OPAM" var root)
   AC_MSG_RESULT([$OPAMROOT])
   AC_MSG_CHECKING([current opam switch])
   OPAMSWITCH=$("$OPAM" switch show)
@@ -336,15 +336,12 @@ if test "x$enable_erlang_analyzers" = "xyes"; then
 fi
 # end if($enable_erlang_analyzers)
 
-if test "x$enable_hack_analyzers" = "xyes"; then
-  if test "x$is_facebook_tree" = "xyes"; then
-    # Look for hackc in $PATH first, then fallback to the bundled version
-    AC_PATH_TOOL([HACKC], [hackc], [no], [$PATH$PATH_SEPARATOR$ac_pwd/facebook/dependencies/bin])
-  else
-    AC_PATH_TOOL([HACKC], [hackc], [no])
-  fi
-fi
-# end if($enable_hack_analyzers)
+AC_PATH_TOOL([HACKC], [hackc], [no])
+AC_MSG_CHECKING([if hackc can run])
+AS_IF([$HACKC --version >/dev/null 2>/dev/null],
+  [AC_MSG_RESULT([yes])],
+  [HACKC=no
+   AC_MSG_RESULT([no])])
 
 if test "x$enable_java_analyzers" = "xyes"; then
   AC_CHECK_TOOL([JAVA], [java], [no])
@@ -357,14 +354,17 @@ if test "x$enable_java_analyzers" = "xyes"; then
   AC_ARG_VAR([KOTLIN_HOME], [Root of a Kotlin installation.])
   AC_CHECK_TOOL([KOTLINC], [kotlinc], [no])
 
+  JAVAC_VERSION=`"$JAVAC" -version 2>&1`
+  AC_MSG_NOTICE([output of javac --version: $JAVAC_VERSION])
   AC_MSG_CHECKING([for Java major version])
   JAVA_MAJOR_VERSION=`"$JAVAC" -version 2>&1 | head -n 1 | cut -d ' ' -f 2`
-  AS_IF([test "x`echo $JAVA_MAJOR_VERSION | cut -d '.' -f 1`" = "x1"], [
+  JAVA_MAJOR_VERSION_FIRST_NUMBER=`echo $JAVA_MAJOR_VERSION | cut -d '.' -f 1`
+  AS_IF([test "x$JAVA_MAJOR_VERSION_FIRST_NUMBER" = "x1"], [
     # version 1.8.xx -> 8
-    JAVA_MAJOR_VERSION=`echo $JAVA_MAJOR_VERSION | cut -d '.' -f 2`
+    JAVA_MAJOR_VERSION=`echo $JAVA_MAJOR_VERSION | cut -d . -f 2`
   ], [
     # otherwise pick the first number as the major version
-    JAVA_MAJOR_VERSION=`echo $JAVA_MAJOR_VERSION | cut -d '.' -f 1`
+    JAVA_MAJOR_VERSION=`echo $JAVA_MAJOR_VERSION | tr - . | cut -d . -f 1`
   ])
   AC_MSG_RESULT([$JAVA_MAJOR_VERSION])
   AC_SUBST([JAVA_MAJOR_VERSION])
@@ -442,7 +442,7 @@ AC_SUBST([NCPU])
 # optional progs and libraries that, eg build systems to be run in integration tests
 
 AC_CHECK_TOOL([ANT], [ant], [no])
-AC_CHECK_TOOL([BUCK], [buck], [no])
+AC_CHECK_TOOL([BUCK], [buck1], [no])
 AC_CHECK_TOOL([EMACS], [emacs], [no])
 AC_ARG_VAR([MVN], [command to execute Maven when running tests])
 AS_IF([test "x$MVN" = "x"], [
@@ -494,6 +494,8 @@ AC_CHECK_TOOL([OTOOL], [otool], [no])
 AC_SUBST([OTOOL])
 AC_CHECK_TOOL([PATCHELF], [patchelf], [no])
 AC_SUBST([PATCHELF])
+
+AC_CHECK_TOOL([HH_SINGLE_TYPE_CHECK], [hh_single_type_check], [no])
 
 AC_CHECK_INFER_MAN_LAST_MODIFIED()
 

@@ -52,9 +52,15 @@ val store_issue_log :
   checker:string -> source_file:Sqlite3.Data.t -> issue_log:Sqlite3.Data.t -> unit
 
 val store_spec :
-     proc_uid:string
+     AnalysisRequest.t
+  -> proc_uid:string
   -> proc_name:Sqlite3.Data.t
-  -> payloads:Sqlite3.Data.t list
-  -> report_summary:Sqlite3.Data.t
-  -> summary_metadata:Sqlite3.Data.t
+  -> merge_pulse_payload:(old_pulse_payload:Sqlite3.Data.t option -> Sqlite3.Data.t list)
+  -> merge_report_summary:(old_report_summary:Sqlite3.Data.t option -> Sqlite3.Data.t)
+  -> merge_summary_metadata:(old_summary_metadata:Sqlite3.Data.t option -> Sqlite3.Data.t)
+  -> unit
+
+val update_report_summary :
+     proc_uid:string
+  -> merge_report_summary:(old_report_summary:Sqlite3.Data.t option -> Sqlite3.Data.t)
   -> unit

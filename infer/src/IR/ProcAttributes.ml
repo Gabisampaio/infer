@@ -33,14 +33,12 @@ let kind_of_objc_accessor_type accessor =
 
 
 let pp_objc_accessor_type fmt objc_accessor_type =
-  let fieldname, typ, annots =
-    match objc_accessor_type with Objc_getter field | Objc_setter field -> field
-  in
+  let field = match objc_accessor_type with Objc_getter field | Objc_setter field -> field in
   F.fprintf fmt "%s<%a:%a@,[%a]>"
     (kind_of_objc_accessor_type objc_accessor_type)
-    Fieldname.pp fieldname (Typ.pp Pp.text) typ
+    Fieldname.pp field.name (Typ.pp Pp.text) field.typ
     (Pp.semicolon_seq ~print_env:Pp.text_break Annot.pp)
-    annots
+    field.annot
 
 
 type var_data =
@@ -49,6 +47,8 @@ type var_data =
   ; modify_in_block: bool
   ; is_constexpr: bool
   ; is_declared_unused: bool
+  ; is_structured_binding: bool
+  ; has_cleanup_attribute: bool
   ; tmp_id: Ident.t option }
 [@@deriving compare]
 
@@ -58,12 +58,18 @@ let default_var_data pvar typ =
   ; modify_in_block= false
   ; is_constexpr= false
   ; is_declared_unused= false
+  ; is_structured_binding= false
+  ; has_cleanup_attribute= false
   ; tmp_id= Pvar.get_tmp_id pvar }
 
 
-let pp_var_data fmt {name; typ; modify_in_block; is_declared_unused} =
-  F.fprintf fmt "@[<h>{ name=@ %a;@ typ=@ %a;@ modify_in_block=@ %b;@ is_declared_unused=@ %b@ }@]"
+let pp_var_data fmt
+    {name; typ; modify_in_block; is_declared_unused; is_structured_binding; has_cleanup_attribute} =
+  F.fprintf fmt
+    "@[<h>{ name=@ %a;@ typ=@ %a;@ modify_in_block=@ %b;@ is_declared_unused=@ %b;@ \
+     is_structured_binding=@ %b;@ has_cleanup_attribute=@ %b@ }@]"
     Mangled.pp name (Typ.pp_full Pp.text) typ modify_in_block is_declared_unused
+    is_structured_binding has_cleanup_attribute
 
 
 type specialized_with_aliasing_info = {orig_proc: Procname.t; aliases: Pvar.t list list}
@@ -109,6 +115,7 @@ type t =
   ; is_java_synchronized_method: bool  (** the procedure is a Java synchronized method *)
   ; is_csharp_synchronized_method: bool  (** the procedure is a C# synchronized method *)
   ; is_hack_async: bool
+  ; is_hack_wrapper: bool
   ; block_as_arg_attributes: block_as_arg_attributes option
         (** Present if the procedure is an Objective-C block that has been passed to a given method
             as argument, including whether it is in a position annotated with the NS_NOESCAPE
@@ -142,8 +149,6 @@ type t =
   }
 
 let get_access attributes = attributes.access
-
-let get_formals attributes = attributes.formals
 
 let get_pvar_formals attributes =
   let pname = attributes.proc_name in
@@ -201,6 +206,7 @@ let default translation_unit proc_name =
   ; is_java_synchronized_method= false
   ; is_csharp_synchronized_method= false
   ; is_hack_async= false
+  ; is_hack_wrapper= false
   ; block_as_arg_attributes= None
   ; is_no_return= false
   ; is_objc_arc_on= false
@@ -278,6 +284,7 @@ let pp f
      ; is_java_synchronized_method
      ; is_csharp_synchronized_method
      ; is_hack_async
+     ; is_hack_wrapper
      ; block_as_arg_attributes
      ; is_no_return
      ; is_objc_arc_on
@@ -343,6 +350,7 @@ let pp f
   pp_bool_default ~default:default.is_csharp_synchronized_method "is_csharp_synchronized_method"
     is_csharp_synchronized_method f () ;
   pp_bool_default ~default:default.is_hack_async "is_hack_async" is_hack_async f () ;
+  pp_bool_default ~default:default.is_hack_wrapper "is_hack_wrapper" is_hack_wrapper f () ;
   if
     not
       ([%equal: block_as_arg_attributes option] default.block_as_arg_attributes

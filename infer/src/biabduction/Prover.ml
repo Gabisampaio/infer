@@ -1324,8 +1324,8 @@ let extend_sub sub v e =
   Predicates.sub_join new_exp_sub (Predicates.sub_range_map (Predicates.exp_sub new_exp_sub) sub)
 
 
-(** Extend [sub1] and [sub2] to witnesses that each instance of [e1\[sub1\]] is an instance of
-    [e2\[sub2\]]. Raise IMPL_FALSE if not possible. *)
+(** Extend [sub1] and [sub2] to witnesses that each instance of [e1[sub1]] is an instance of
+    [e2[sub2]]. Raise IMPL_FALSE if not possible. *)
 let exp_imply tenv calc_missing (subs : subst2) e1_in e2_in : subst2 =
   let e1 = Prop.exp_normalize_noabs tenv (fst subs) e1_in in
   let e2 = Prop.exp_normalize_noabs tenv (snd subs) e2_in in
@@ -1491,8 +1491,8 @@ let array_len_imply tenv calc_missing subs len1 len2 indices2 =
       subs
 
 
-(** Extend [sub1] and [sub2] to witnesses that each instance of [se1\[sub1\]] is an instance of
-    [se2\[sub2\]]. Raise IMPL_FALSE if not possible. *)
+(** Extend [sub1] and [sub2] to witnesses that each instance of [se1[sub1]] is an instance of
+    [se2[sub2]]. Raise IMPL_FALSE if not possible. *)
 let rec sexp_imply tenv source calc_index_frame calc_missing subs se1 se2 typ2 :
     subst2 * Predicates.strexp option * Predicates.strexp option =
   (* L.d_str "sexp_imply "; Predicates.d_sexp se1; L.d_str " "; Predicates.d_sexp se2;
@@ -1767,8 +1767,11 @@ let expand_hpred_pointer =
                     (* type of struct at adr_base is known *)
                     Some
                       (Exp.Sizeof
-                         {typ= adr_typ; nbytes= None; dynamic_length= None; subtype= Subtype.exact}
-                      )
+                         { typ= adr_typ
+                         ; nbytes= None
+                         ; dynamic_length= None
+                         ; subtype= Subtype.exact
+                         ; nullable= false } )
                 | None ->
                     None )
               | _ ->
@@ -1783,7 +1786,7 @@ let expand_hpred_pointer =
                      type of contents is known, so construct struct type for single fld:cnt_typ *)
                   let name = Typ.Name.C.from_string ("counterfeit" ^ string_of_int !count) in
                   incr count ;
-                  let fields = [(fld, cnt_typ, Annot.Item.empty)] in
+                  let fields = [Struct.mk_field fld cnt_typ] in
                   ignore (Tenv.mk_struct tenv ~fields name) ;
                   Exp.Sizeof {sizeof_data with typ= Typ.mk (Tstruct name)}
               | _ ->
@@ -1943,7 +1946,12 @@ let handle_parameter_subtype tenv prop1 sigma2 subs (e1, se1, texp1) (se2, texp2
           if (not (Typ.equal t1 t2)) && SubtypingCheck.check_subtype tenv t1 t2 then
             let pos_type_opt, _ =
               SubtypingCheck.subtype_case_analysis tenv
-                (Exp.Sizeof {typ= t1; nbytes= None; dynamic_length= None; subtype= Subtype.subtypes})
+                (Exp.Sizeof
+                   { typ= t1
+                   ; nbytes= None
+                   ; dynamic_length= None
+                   ; subtype= Subtype.subtypes
+                   ; nullable= false } )
                 (Exp.Sizeof sizeof_data2)
             in
             match pos_type_opt with
@@ -2262,14 +2270,16 @@ and sigma_imply tenv calc_index_frame calc_missing subs prop1 sigma2 : subst2 * 
             { typ= Typ.mk_array (Typ.mk (Tint Typ.IChar)) ~length:len ~stride:(IntLit.of_int 1)
             ; nbytes= None
             ; dynamic_length= None
-            ; subtype= Subtype.exact }
+            ; subtype= Subtype.exact
+            ; nullable= false }
       | Java ->
           let object_type = StdTyp.Name.Java.java_lang_string in
           Exp.Sizeof
             { typ= Typ.mk (Tstruct object_type)
             ; nbytes= None
             ; dynamic_length= None
-            ; subtype= Subtype.exact }
+            ; subtype= Subtype.exact
+            ; nullable= false }
       | CIL ->
           (* cil todo *)
           (* Logging.die Logging.InternalError "No string constant support for CIL yet." *)
@@ -2278,7 +2288,8 @@ and sigma_imply tenv calc_index_frame calc_missing subs prop1 sigma2 : subst2 * 
             { typ= Typ.mk (Tstruct object_type)
             ; nbytes= None
             ; dynamic_length= None
-            ; subtype= Subtype.exact }
+            ; subtype= Subtype.exact
+            ; nullable= false }
       | Erlang ->
           L.die InternalError "Erlang not supported"
       | Hack ->
@@ -2304,7 +2315,8 @@ and sigma_imply tenv calc_index_frame calc_missing subs prop1 sigma2 : subst2 * 
         { typ= Typ.mk (Tstruct class_type)
         ; nbytes= None
         ; dynamic_length= None
-        ; subtype= Subtype.exact }
+        ; subtype= Subtype.exact
+        ; nullable= false }
     in
     Predicates.Hpointsto (root, sexp, class_texp)
   in

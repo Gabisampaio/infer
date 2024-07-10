@@ -32,6 +32,7 @@ let textual_keywords =
     ; ("define", DEFINE)
     ; ("else", ELSE)
     ; ("extends", EXTENDS)
+    ; ("equals", EQUALS)
     ; ("false", FALSE)
     ; ("float", FLOAT)
     ; ("global", GLOBAL)
@@ -66,7 +67,9 @@ let upper = [%sedlex.regexp? 'A' .. 'Z']
 
 let letter = [%sedlex.regexp? lower | upper]
 
-let ident = [%sedlex.regexp? (letter | Chars "_$"), Star (letter | digit | Chars "_$" | "::")]
+let ident =
+  [%sedlex.regexp? (letter | Chars "_$"), Star (letter | digit | Chars "_$" | "::" | ":::")]
+
 
 let binary_numeral_prefix = [%sedlex.regexp? "0", Chars "bB"]
 
@@ -181,7 +184,8 @@ let build_mainlex keywords =
     | ident ->
         let lexeme = Lexbuf.lexeme lexbuf in
         Option.value ~default:(IDENT lexeme) (Map.find keywords lexeme)
-    | '"', Star (Compl '"'), '"' ->
+    | '"', Star (Compl ('"' | '\\') | '\\', any), '"' ->
+        (* a string literal may contain an escaped double quote *)
         let lexeme = Lexbuf.lexeme lexbuf in
         STRING (String.sub ~pos:1 ~len:(String.length lexeme - 2) lexeme)
     | eof ->

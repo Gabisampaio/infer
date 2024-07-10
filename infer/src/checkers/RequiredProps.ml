@@ -46,7 +46,7 @@ let get_required_props typename tenv =
   match Tenv.lookup tenv typename with
   | Some {fields} ->
       List.filter_map
-        ~f:(fun (fieldname, _, annot) ->
+        ~f:(fun {Struct.name= fieldname; annot} ->
           if is_required annot then
             let prop = Fieldname.get_field_name fieldname in
             let var_prop_opt = get_var_args annot in
@@ -302,7 +302,7 @@ module Analyzer = LowerHil.MakeAbstractInterpreter (TransferFunctions)
 let init_analysis_data ({InterproceduralAnalysis.analyze_dependency} as interproc) =
   let get_proc_summary_and_formals callee_pname =
     let open IOption.Let_syntax in
-    let* callee_summary = analyze_dependency callee_pname in
+    let* callee_summary = analyze_dependency callee_pname |> AnalysisResult.to_option in
     let+ callee_attrs = Attributes.load callee_pname in
     (callee_summary, ProcAttributes.get_pvar_formals callee_attrs)
   in

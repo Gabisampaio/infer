@@ -4,6 +4,6 @@
 // LICENSE file in the root directory of this source tree.
 
 function loop_linear_FN(int $x): void {
-  for ($i = 0; i < $x; $i++) {
+  for ($i = 0; $i < $x; $i++) {
   }
 }

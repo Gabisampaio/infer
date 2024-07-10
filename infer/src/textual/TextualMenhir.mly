@@ -29,6 +29,7 @@
 %token EOF
 %token EQ
 %token EXTENDS
+%token EQUALS
 %token FALSE
 %token FLOAT
 %token FUN
@@ -110,6 +111,7 @@ basic_ident:
   | DECLARE { "declare" }
   | DEFINE { "define" }
   | EXTENDS { "extends" }
+  | EQUALS { "equals" }
   | GLOBAL { "global" }
   | JMP { "jmp" }
   | LOCALKEYWORD { "local" }
@@ -152,6 +154,12 @@ nname:
 tname:
   | id=ident
     { { TypeName.value=id; loc=location_of_pos $startpos(id) } }
+
+tname_or_void:
+  | tname=tname
+    { tname }
+  | VOID
+    { { TypeName.value="void"; loc=location_of_pos $startpos } }
 
 opt_tname:
   | tname=tname
@@ -197,6 +205,10 @@ extends:
   | EXTENDS supers=separated_nonempty_list(COMMA,tname)
   { supers }
 
+typedef:
+  | union_list=separated_nonempty_list(COMMA,tname_or_void)
+  { union_list }
+
 declaration:
   | GLOBAL name=vname COLON annotated_typ=annotated_typ
     { let typ = annotated_typ.Typ.typ in
@@ -214,6 +226,11 @@ declaration:
                         {FieldDecl.qualified_name; typ; attributes}) in
       let supers = Option.value supers ~default:[] in
       Module.Struct {name= typ_name; supers; fields; attributes} }
+   | TYPE typ_name=tname EQUALS typ_definition=typedef alias_attributes=annots
+    { let loc = location_of_pos $startpos(typ_name) in
+      let kind_attribute  = {Attr.name="kind"; values=["typedef"]; loc} in
+      let attributes =  kind_attribute :: alias_attributes in
+    Module.Struct {name= typ_name; supers=typ_definition; fields=[]; attributes}}
   | DECLARE attributes=annots qualified_name=qualified_pname_and_lparen
             formals_types=declaration_types
             RPAREN COLON result_type=annotated_typ

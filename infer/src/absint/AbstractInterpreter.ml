@@ -117,11 +117,16 @@ module type NodeTransferFunctions = sig
     -> Domain.t
   (** specifies how to symbolically execute the instructions of a node, using [exec_instr] to go
       over a single instruction *)
+
+  val pp_domain : Pp.print_kind -> F.formatter -> Domain.t -> unit
+  (** some checkers may want to do custom pretty printing for HTML debug *)
 end
 
 (** most transfer functions will use this simple [Instrs.fold] approach *)
 module SimpleNodeTransferFunctions (T : TransferFunctions.SIL) = struct
   include T
+
+  let pp_domain = Pp.escape_xml Domain.pp
 
   let join_all x ~into =
     List.fold x ~init:into ~f:(fun acc astate ->
@@ -143,6 +148,8 @@ end
 
 module BackwardNodeTransferFunction (T : TransferFunctions) = struct
   include T
+
+  let pp_domain = Pp.escape_xml Domain.pp
 
   (*
      In a backward block, each instruction should receive the normal states from is successor instr,
@@ -216,8 +223,13 @@ struct
     List.exists disjs ~f:(fun disj' -> leq ~lhs:disj ~rhs:disj')
 
 
+  let add_dropped_disjuncts dropped non_disj =
+    DisjunctiveMetadata.add_dropped_disjuncts (List.length dropped) ;
+    T.remember_dropped_disjuncts dropped non_disj
+
+
   module Domain = struct
-    (** a list [\[x1; x2; ...; xN\]] represents a disjunction [x1 ∨ x2 ∨ ... ∨ xN] *)
+    (** a list [[x1; x2; ...; xN]] represents a disjunction [x1 ∨ x2 ∨ ... ∨ xN] *)
     type t = T.DisjDomain.t list * T.NonDisjDomain.t
 
     (** [append_no_duplicates_up_to leq ~limit from ~into ~into_length] is a triple where
@@ -227,10 +239,13 @@ struct
 
         - the second element is the length of the first element
 
-        - the third element is an over-approximation of how many elements from the
-          [(rev from') @ into] were dropped to fit within [limit]; the over-approximation comes from
-          the fact that leftover elements of [from] are not checked for inclusion in [into] so it
-          could be that some of them would have been left out regardless of the limit. *)
+        - the third element is the list of dropped elements in [from]
+
+        - the fourth element is the length of the third element. This is an over-approximation of
+          how many elements from the [(rev from') @ into] were dropped to fit within [limit]; the
+          over-approximation comes from the fact that leftover elements of [from] are not checked
+          for inclusion in [into] so it could be that some of them would have been left out
+          regardless of the limit. *)
     let append_no_duplicates_up_to leq ~limit from ~into ~into_length =
       let rec aux acc n_acc from =
         match from with
@@ -238,13 +253,13 @@ struct
             (* check with respect to the original [into] and not [acc] as we assume lists of
                disjuncts are already deduplicated *)
             if has_geq_disj ~leq ~than:hd into then
-              (* [hd] is already implied by one of the states in [into]; skip it
+              (* [hd] implies one of the states in [into]; skip it
                  ([(a=>b) => (a\/b <=> b)]) *)
               aux acc n_acc tl
             else aux (hd :: acc) (n_acc + 1) tl
         | _ ->
             (* [from] is empty or [n_acc ≥ limit], either way we are done *)
-            (acc, n_acc, List.length from)
+            (acc, n_acc, from, List.length from)
       in
       aux into into_length from
 
@@ -252,17 +267,21 @@ struct
     let length_and_cap_to_limit n l =
       let length = List.length l in
       let n_dropped = max 0 (length - n) in
-      (List.drop l n_dropped, min length n, n_dropped)
+      let dropped, kept = List.split_n l n_dropped in
+      (kept, dropped, min length n)
 
 
     (** Ignore states in [lhs] that are over-approximated in [rhs] according to [leq] and
         vice-versa. Favors keeping states in [lhs]. Returns no more than [limit] disjuncts. *)
     let join_up_to_with_leq ~limit leq ~into:lhs rhs =
-      let lhs, lhs_length, n_dropped = length_and_cap_to_limit limit lhs in
-      if phys_equal lhs rhs || lhs_length >= limit then (lhs, lhs_length, n_dropped)
+      let lhs, dropped_from_lhs, lhs_length = length_and_cap_to_limit limit lhs in
+      if phys_equal lhs rhs || lhs_length >= limit then (lhs, lhs_length, dropped_from_lhs)
       else
         (* this filters only in one direction for now, could be worth doing both ways *)
-        append_no_duplicates_up_to leq ~limit (List.rev rhs) ~into:lhs ~into_length:lhs_length
+        let kept, kept_length, dropped, _ =
+          append_no_duplicates_up_to leq ~limit (List.rev rhs) ~into:lhs ~into_length:lhs_length
+        in
+        (kept, kept_length, dropped_from_lhs @ dropped)
 
 
     let join_up_to ~limit ~into:lhs rhs =
@@ -302,26 +321,28 @@ struct
         DisjunctiveMetadata.incr_interrupted_loops () ;
         prev )
       else
-        let post_disj, _, n_dropped =
+        let post_disj, _, dropped =
           join_up_to_with_leq ~limit:disjunct_limit T.DisjDomain.leq ~into:(fst prev) (fst next)
         in
-        let post =
-          (post_disj, T.NonDisjDomain.widen ~prev:(snd prev) ~next:(snd next) ~num_iters)
-        in
-        if leq ~lhs:post ~rhs:prev then prev
-        else (
-          DisjunctiveMetadata.add_dropped_disjuncts n_dropped ;
-          post )
+        let next_non_disj = T.NonDisjDomain.widen ~prev:(snd prev) ~next:(snd next) ~num_iters in
+        if leq ~lhs:(post_disj, next_non_disj) ~rhs:prev then prev
+        else (post_disj, add_dropped_disjuncts dropped next_non_disj)
 
 
-    let pp f (disjuncts, non_disj) =
+    let pp_ (pp_kind : Pp.print_kind) f (disjuncts, non_disj) =
       let pp_disjuncts f disjuncts =
         List.iteri (List.rev disjuncts) ~f:(fun i disjunct ->
-            F.fprintf f "#%d: @[%a@]@;" i T.DisjDomain.pp disjunct )
+            F.fprintf f "#%d: @[%a@]@;" i (T.pp_disjunct pp_kind) disjunct )
       in
-      F.fprintf f "@[<v>%d disjuncts:@;%a@;@[<hv 2>Non-disj state:@ %a@]@]" (List.length disjuncts)
-        pp_disjuncts disjuncts T.NonDisjDomain.pp non_disj
+      F.fprintf f "@[<v>%d disjuncts:@;%a%a@]" (List.length disjuncts) pp_disjuncts disjuncts
+        (Pp.html_collapsible_block ~name:"Non-disjunctive state" pp_kind T.NonDisjDomain.pp)
+        non_disj
+
+
+    let pp = pp_ TEXT
   end
+
+  let pp_domain = Domain.pp_
 
   let join_all_disj_astates ~into astates =
     let leq ~lhs ~rhs = T.DisjDomain.equal_fast lhs rhs in
@@ -383,16 +404,16 @@ struct
        already recorded in the post of a node (and therefore that will stay there).  It is always
        set from [exec_node_instrs], so [remaining_disjuncts] should always be [Some _]. *)
     let limit = Option.value_exn (AnalysisState.get_remaining_disjuncts ()) in
-    let (disjuncts, non_disj_astates), _ =
+    let (disjuncts, non_disj_astates), dropped, _ =
       List.foldi (List.rev pre_disjuncts)
-        ~init:(([], []), 0)
-        ~f:(fun i (((post, non_disj_astates) as post_astate), n_disjuncts) pre_disjunct ->
+        ~init:(([], []), [], 0)
+        ~f:(fun i (((post, non_disj_astates) as post_astate), dropped, n_disjuncts) pre_disjunct ->
           if n_disjuncts >= limit then (
             L.d_printfln "@[<v2>Reached max disjuncts limit, skipping disjunct #%d@;@]" i ;
-            DisjunctiveMetadata.add_dropped_disjuncts 1 ;
-            (post_astate, n_disjuncts) )
+            (post_astate, pre_disjunct :: dropped, n_disjuncts) )
           else
-            L.d_with_indent "Executing instruction from disjunct #%d" i ~f:(fun () ->
+            L.with_indent ~escape_result:false "Executing instruction from disjunct #%d" i
+              ~f:(fun () ->
                 (* check timeout once per disjunct to execute instead of once for all disjuncts *)
                 Timer.check_timeout () ;
                 let disjuncts', non_disj' =
@@ -402,13 +423,15 @@ struct
                     let n = List.length disjuncts' in
                     L.d_printfln "@[Got %d disjunct%s back@]" n (if Int.equal n 1 then "" else "s")
                 ) ;
-                let post_disj', n, dropped = Domain.join_up_to ~limit ~into:post disjuncts' in
-                DisjunctiveMetadata.add_dropped_disjuncts dropped ;
-                ((post_disj', non_disj' :: non_disj_astates), n) ) )
+                let post_disj', n, new_dropped = Domain.join_up_to ~limit ~into:post disjuncts' in
+                ((post_disj', non_disj' :: non_disj_astates), new_dropped @ dropped, n) ) )
     in
-    ( disjuncts
-    , if List.is_empty disjuncts then non_disj
-      else List.fold ~init:T.NonDisjDomain.bottom ~f:T.NonDisjDomain.join non_disj_astates )
+    let non_disj =
+      if List.is_empty disjuncts then non_disj
+      else List.fold ~init:T.NonDisjDomain.bottom ~f:T.NonDisjDomain.join non_disj_astates
+    in
+    let non_disj = add_dropped_disjuncts dropped non_disj in
+    (disjuncts, non_disj)
 
 
   let exec_node_instrs old_state_opt ~exec_instr (pre, pre_non_disj) instrs =
@@ -426,34 +449,39 @@ struct
       | Some {State.post= post_disjuncts, post_non_disjunct; _} ->
           ((post_disjuncts, post_non_disjunct), List.length post_disjuncts)
     in
-    let ((disjuncts, non_disj_astates), _), need_join_non_disj =
-      List.foldi (List.rev pre) ~init:(current_post_n, false)
+    let ((disjuncts, non_disj_astates), _), dropped, need_join_non_disj =
+      List.foldi (List.rev pre) ~init:(current_post_n, [], false)
         ~f:(fun
-             i
-             ((((post, non_disj_astate) as post_astate), n_disjuncts), need_join_non_disj)
-             pre_disjunct
-           ->
+            i
+            ((((post, non_disj_astate) as post_astate), n_disjuncts), dropped, need_join_non_disj)
+            pre_disjunct
+          ->
           let limit = disjunct_limit - n_disjuncts in
           AnalysisState.set_remaining_disjuncts limit ;
-          if limit <= 0 then (
-            L.d_printfln "@[Reached disjunct limit: already got %d disjuncts@]@;" n_disjuncts ;
-            DisjunctiveMetadata.add_dropped_disjuncts 1 ;
-            (((post, non_disj_astate), n_disjuncts), true) )
-          else if is_new_pre pre_disjunct then (
-            L.d_printfln "@[<v2>Executing node from disjunct #%d, setting limit to %d@;" i limit ;
-            let disjuncts', non_disj' =
-              Instrs.foldi ~init:([pre_disjunct], pre_non_disj) instrs ~f:exec_instr
-            in
-            L.d_printfln "@]@\n" ;
-            let disj', n, dropped = Domain.join_up_to ~limit:disjunct_limit ~into:post disjuncts' in
-            DisjunctiveMetadata.add_dropped_disjuncts dropped ;
-            (((disj', T.NonDisjDomain.join non_disj_astate non_disj'), n), need_join_non_disj) )
+          let is_new_pre = is_new_pre pre_disjunct in
+          if is_new_pre then
+            if limit <= 0 then (
+              L.d_printfln "@[Reached disjunct limit: already got %d disjuncts@]@;" n_disjuncts ;
+              (((post, non_disj_astate), n_disjuncts), pre_disjunct :: dropped, true) )
+            else (
+              L.d_printfln "@[<v2>Executing node from disjunct #%d, setting limit to %d@;" i limit ;
+              let disjuncts', non_disj' =
+                Instrs.foldi ~init:([pre_disjunct], pre_non_disj) instrs ~f:exec_instr
+              in
+              L.d_printfln "@]@\n" ;
+              let disj', n, new_dropped =
+                Domain.join_up_to ~limit:disjunct_limit ~into:post disjuncts'
+              in
+              ( ((disj', T.NonDisjDomain.join non_disj_astate non_disj'), n)
+              , new_dropped @ dropped
+              , need_join_non_disj ) )
           else (
             L.d_printfln "@[Skipping already-visited disjunct #%d@]@;" i ;
             (* HACK: [pre_non_disj] may have a new information, e.g. when the predecessor node
                reached the disjunct limit, so join [pre_non_disj]. *)
-            ((post_astate, n_disjuncts), true) ) )
+            ((post_astate, n_disjuncts), dropped, true) ) )
     in
+    let non_disj_astates = add_dropped_disjuncts dropped non_disj_astates in
     let non_disjunct =
       if
         Config.pulse_prevent_non_disj_top
@@ -500,7 +528,7 @@ module AbstractInterpreterCommon (TransferFunctions : NodeTransferFunctions) = s
   (** extract the precondition of node [n] from [inv_map] *)
   let extract_pre node_id inv_map = extract_state node_id inv_map |> Option.map ~f:State.pre
 
-  let pp_domain_html = Pp.html_collapsible_block ~name:"Show/hide the state" Domain.pp
+  let pp_domain_html = TransferFunctions.pp_domain HTML
 
   let debug_absint_operation op =
     let pp_op fmt op =
@@ -584,7 +612,7 @@ module AbstractInterpreterCommon (TransferFunctions : NodeTransferFunctions) = s
           | None ->
               fun fmt -> F.fprintf fmt "<unknown>"
         in
-        L.d_with_indent ~name_color:Blue ~collapsible:true ~pp_result ~escape_result:false
+        L.with_indent ~name_color:Blue ~collapsible:true ~pp_result ~escape_result:false
           "exec_instr %t" pp_instr ~f:(fun () ->
             try
               let post = TransferFunctions.exec_instr pre proc_data node idx instr in
@@ -707,7 +735,7 @@ module AbstractInterpreterCommon (TransferFunctions : NodeTransferFunctions) = s
   (* shadowed for HTML debug *)
   let compute_pre cfg node inv_map =
     AnalysisCallbacks.html_debug_new_node_session (Node.underlying_node node) ~kind:`ComputePre
-      ~pp_name:(TransferFunctions.pp_session_name node) ~f:(fun () -> compute_pre cfg node inv_map)
+      ~pp_name:(TransferFunctions.pp_session_name node) ~f:(fun () -> compute_pre cfg node inv_map )
 
 
   (** compute and return an invariant map for [pdesc] *)

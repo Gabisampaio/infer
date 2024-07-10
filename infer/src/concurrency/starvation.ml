@@ -29,21 +29,53 @@ module TransferFunctions (CFG : ProcCfg.S) = struct
 
 
   let hilexp_of_sil ~add_deref (astate : Domain.t) silexp typ =
-    let f_resolve_id var = Domain.VarDomain.get var astate.var_state in
-    HilExp.of_sil ~include_array_indexes:false ~f_resolve_id ~add_deref silexp typ
+    (* If there is a structure like this
+     * varA -> varB, varB -> SomeConstantLock (static class)
+     * and there is code unlock(varB), we want to varB to resolve to SomeConstantLock
+     * Unfortuantely, this can't be done directly, because SomeConstantLock is not an access expression
+     * so we do it via side effects of constant_var *)
+    let constant_var = ref None in
+    let f_resolve_id var =
+      Domain.VarDomain.get var astate.var_state
+      |> Option.bind ~f:(function
+           | StarvationDomain.AccessExpressionOrConst.AE exp ->
+               Some exp
+           | StarvationDomain.AccessExpressionOrConst.Const exp ->
+               ( match !constant_var with
+               | None ->
+                   ()
+               | Some _e ->
+                   L.internal_error "Double resolved id %a in expression %a" (Const.pp Pp.text) exp
+                     Exp.pp silexp ) ;
+               constant_var := Some exp ;
+               None )
+    in
+    let hil = HilExp.of_sil ~include_array_indexes:false ~f_resolve_id ~add_deref silexp typ in
+    let hil = match !constant_var with None -> hil | Some c -> HilExp.Constant c in
+    hil
 
 
   let hilexp_of_sils ~add_deref astate silexps =
     List.map silexps ~f:(fun (exp, typ) -> hilexp_of_sil ~add_deref astate exp typ)
 
 
-  let rec get_access_expr (hilexp : HilExp.t) =
+  let rec get_access_expr_or_const (hilexp : HilExp.t) =
     match hilexp with
     | AccessExpression access_exp ->
-        Some access_exp
+        Some (Domain.AccessExpressionOrConst.AE access_exp)
+    | Constant c ->
+        Some (Domain.AccessExpressionOrConst.Const c)
     | Cast (_, hilexp) | Exception hilexp | UnaryOperator (_, hilexp, _) ->
-        get_access_expr hilexp
-    | BinaryOperator _ | Closure _ | Constant _ | Sizeof _ ->
+        get_access_expr_or_const hilexp
+    | BinaryOperator _ | Closure _ | Sizeof _ ->
+        None
+
+
+  let get_access_expr (hilexp : HilExp.t) =
+    match get_access_expr_or_const hilexp with
+    | Some (Domain.AccessExpressionOrConst.AE access_exp) ->
+        Some access_exp
+    | _ ->
         None
 
 
@@ -142,9 +174,10 @@ module TransferFunctions (CFG : ProcCfg.S) = struct
     else Domain.set_non_null formals lhs_access_exp astate
 
 
-  let do_call {interproc= {tenv; analyze_dependency}; formals} lhs callee actuals loc
+  let do_call {interproc= {proc_desc; tenv; analyze_dependency}; formals} lhs callee actuals loc
       (astate : Domain.t) =
     let open Domain in
+    let procname = Procdesc.get_proc_name proc_desc in
     let make_ret_attr return_attribute = {empty_summary with return_attribute} in
     let make_thread thread = {empty_summary with thread} in
     let actuals_acc_exps = get_access_expr_list actuals in
@@ -174,7 +207,7 @@ module TransferFunctions (CFG : ProcCfg.S) = struct
         Some (make_ret_attr (Looper ForUIThread))
       else None
     in
-    let get_callee_summary () = analyze_dependency callee in
+    let get_callee_summary () = analyze_dependency callee |> AnalysisResult.to_option in
     let treat_handler_constructor () =
       if StarvationModels.is_handler_constructor tenv callee actuals then
         match actuals_acc_exps with
@@ -238,7 +271,7 @@ module TransferFunctions (CFG : ProcCfg.S) = struct
       |> Option.map ~f:(fun summary ->
              let subst = Lock.make_subst formals actuals in
              let callsite = CallSite.make callee loc in
-             Domain.integrate_summary ~tenv ~lhs ~subst formals callsite astate summary )
+             Domain.integrate_summary ~tenv ~procname ~lhs ~subst formals callsite astate summary )
     in
     IList.eval_until_first_some
       [ treat_handler_constructor
@@ -258,7 +291,7 @@ module TransferFunctions (CFG : ProcCfg.S) = struct
     let add_deref = match (lhs_var : Var.t) with LogicalVar _ -> true | ProgramVar _ -> false in
     let rhs_hil_exp = hilexp_of_sil ~add_deref astate rhs_exp rhs_typ in
     let astate =
-      get_access_expr rhs_hil_exp
+      get_access_expr_or_const rhs_hil_exp
       |> Option.value_map ~default:astate ~f:(fun acc_exp ->
              {astate with var_state= Domain.VarDomain.set lhs_var acc_exp astate.var_state} )
     in
@@ -272,6 +305,42 @@ module TransferFunctions (CFG : ProcCfg.S) = struct
         do_load tenv formals ~lhs:(Var.of_id id, base_typ) e typ astate
     | _ ->
         astate
+
+
+  let check_function_pointer_model fn_ptr =
+    match Config.starvation_c_function_pointer_models with
+    | `Assoc models ->
+        let pointer_name : string = Format.asprintf "%a" HilExp.pp fn_ptr in
+        List.find_map
+          ~f:(function
+            | model_pointer_name, `String model_target
+              when String.equal model_pointer_name pointer_name ->
+                L.debug Analysis Verbose "Mapping %s -> %s" pointer_name model_target ;
+                Some model_target
+            | _ ->
+                None )
+          models
+    | _ ->
+        None
+
+
+  let do_function_pointer_call analysis_data loc id typ fn_ptr sil_actuals astate =
+    let ret_base = (Var.of_id id, typ) in
+    let ret_exp = HilExp.AccessExpression.base ret_base in
+    let actuals = hilexp_of_sils ~add_deref:false astate sil_actuals in
+    let astate =
+      match hilexp_of_sils ~add_deref:false astate [fn_ptr] with
+      | [] ->
+          astate
+      | fn_ptr :: _rest -> (
+        match check_function_pointer_model fn_ptr with
+        | Some model_target ->
+            let callee = Procname.from_string_c_fun model_target in
+            do_call analysis_data ret_exp callee actuals loc astate
+        | None ->
+            astate )
+    in
+    astate
 
 
   let exec_instr (astate : Domain.t) ({interproc= {proc_desc; tenv}; formals} as analysis_data) _ _
@@ -309,6 +378,9 @@ module TransferFunctions (CFG : ProcCfg.S) = struct
     | Call ((id, base_typ), Const (Cfun callee), actuals, _, _)
       when Procname.equal callee BuiltinDecl.__cast ->
         do_cast tenv formals id base_typ actuals astate
+    | Call ((id, typ), Const (Cfun callee), fn_ptr :: fn_args, loc, _)
+      when Procname.equal callee BuiltinDecl.__call_c_function_ptr ->
+        do_function_pointer_call analysis_data loc id typ fn_ptr fn_args astate
     | Call ((id, typ), Const (Cfun callee), sil_actuals, loc, _) -> (
         let ret_base = (Var.of_id id, typ) in
         let actuals = hilexp_of_sils ~add_deref:false astate sil_actuals in
@@ -408,7 +480,7 @@ let set_initial_attributes ({InterproceduralAnalysis.proc_desc} as interproc) as
   let procname = Procdesc.get_proc_name proc_desc in
   if not Config.starvation_whole_program then astate
   else
-    match Procname.base_of procname with
+    match procname with
     | Procname.Java java_pname when Procname.Java.is_class_initializer java_pname ->
         (* we are analyzing the class initializer, don't go through on-demand again *)
         astate
@@ -432,19 +504,25 @@ let analyze_procedure ({InterproceduralAnalysis.proc_desc; tenv} as interproc) =
     let formals = FormalMap.make (Procdesc.get_attributes proc_desc) in
     let proc_data = {interproc; formals} in
     let loc = Procdesc.get_loc proc_desc in
-    let set_lock_state_for_synchronized_proc astate =
+    let locks_for_synchronized_proc =
       if Procdesc.is_java_synchronized proc_desc || Procdesc.is_csharp_synchronized proc_desc then
-        Domain.Lock.make_java_synchronized formals procname
-        |> Option.to_list
-        |> Domain.acquire ~tenv astate ~procname ~loc
-      else astate
+        Domain.Lock.make_java_synchronized formals procname |> Option.to_list
+      else []
+    in
+    let set_lock_state_for_synchronized_proc astate =
+      Domain.acquire ~tenv astate ~procname ~loc locks_for_synchronized_proc
+    in
+    let release_lock_state_for_synchronized_proc astate =
+      Domain.release astate locks_for_synchronized_proc
     in
     let set_thread_status_by_annotation (astate : Domain.t) =
       let thread =
         if ConcurrencyModels.annotated_as_worker_thread tenv procname then
           Domain.ThreadDomain.BGThread
         else if ConcurrencyModels.runs_on_ui_thread tenv procname then Domain.ThreadDomain.UIThread
-        else astate.thread
+        else
+          ConcurrencyModels.annotated_as_named_thread procname
+          |> Option.value_map ~f:(fun n -> Domain.ThreadDomain.NamedThread n) ~default:astate.thread
       in
       {astate with thread}
     in
@@ -461,6 +539,7 @@ let analyze_procedure ({InterproceduralAnalysis.proc_desc; tenv} as interproc) =
       |> set_ignore_blocking_calls_flag
     in
     Analyzer.compute_post proc_data ~initial proc_desc
+    |> Option.map ~f:release_lock_state_for_synchronized_proc
     |> Option.map ~f:(Domain.summary_of_astate proc_desc)
 
 
@@ -635,14 +714,20 @@ let should_report_deadlock_on_current_proc current_elem endpoint_elem =
 
 
 let should_report attrs =
-  match Procname.base_of (ProcAttributes.get_proc_name attrs) with
-  | Procname.Java java_pname ->
-      (not (Procname.Java.is_autogen_method java_pname))
-      && not (Procname.Java.is_class_initializer java_pname)
-  | Procname.ObjC_Cpp _ ->
-      true
-  | _ ->
-      false
+  let procname = ProcAttributes.get_proc_name attrs in
+  let should_report' procname =
+    match procname with
+    | Procname.Java java_pname ->
+        (not (Procname.Java.is_autogen_method java_pname))
+        && not (Procname.Java.is_class_initializer java_pname)
+    | Procname.ObjC_Cpp _ ->
+        true
+    | Procname.C _ ->
+        true
+    | _ ->
+        false
+  in
+  should_report' procname
 
 
 let fold_reportable_summaries analyze_ondemand tenv clazz ~init ~f =
@@ -791,7 +876,7 @@ let report_on_pair ~analyze_ondemand tenv pattrs (pair : Domain.CriticalPair.t) 
       (* warn only at the innermost procedure taking a lock around the final call *)
       let procs_with_acquisitions =
         Acquisitions.fold
-          (fun (acquisition : Acquisition.t) acc -> Procname.Set.add acquisition.procname acc)
+          (fun (acquisition : Acquisition.t) acc -> Procname.Set.add acquisition.elem.procname acc)
           pair.elem.acquisitions Procname.Set.empty
       in
       match Procname.Set.is_singleton_or_more procs_with_acquisitions with
@@ -859,7 +944,10 @@ let reporting {InterproceduralAnalysis.procedures; file_exe_env; analyze_file_de
   else
     let report_on_proc tenv pattrs report_map payload =
       Domain.fold_critical_pairs_of_summary
-        (report_on_pair ~analyze_ondemand:analyze_file_dependency tenv pattrs)
+        (report_on_pair
+           ~analyze_ondemand:(fun proc_name ->
+             analyze_file_dependency proc_name |> AnalysisResult.to_option )
+           tenv pattrs )
         payload report_map
     in
     let report_procedure report_map procname =
@@ -867,7 +955,7 @@ let reporting {InterproceduralAnalysis.procedures; file_exe_env; analyze_file_de
       | None ->
           report_map
       | Some attributes ->
-          analyze_file_dependency procname
+          analyze_file_dependency procname |> AnalysisResult.to_option
           |> Option.value_map ~default:report_map ~f:(fun summary ->
                  let tenv = Exe_env.get_proc_tenv file_exe_env procname in
                  if should_report attributes then report_on_proc tenv attributes report_map summary

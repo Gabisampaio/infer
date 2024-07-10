@@ -145,7 +145,7 @@ let create_sil_class_field cn {Javalib.cf_signature; cf_annotations; cf_kind} =
     | Javalib.NotFinal ->
         real_annotations
   in
-  (field_name, field_type, annotation)
+  Struct.mk_field field_name field_type ~annot:annotation
 
 
 (** Collect static field if static is true, otherwise non-static ones. *)
@@ -161,12 +161,15 @@ let collect_interface_field cn inf l =
   let field_type = get_named_type (JBasics.fs_type fs) in
   let field_name = create_fieldname cn fs in
   let annotation = JAnnotation.translate_item inf.Javalib.if_annotations in
-  (field_name, field_type, annotation) :: l
+  let field = Struct.mk_field field_name field_type ~annot:annotation in
+  field :: l
 
 
 let collect_models_class_fields classpath_field_map cn cf fields =
   let static, nonstatic = fields in
-  let field_name, field_type, annotation = create_sil_class_field cn cf in
+  let {Struct.name= field_name; typ= field_type; annot= annotation} =
+    create_sil_class_field cn cf
+  in
   match Fieldname.Map.find_opt field_name classpath_field_map with
   | Some classpath_ft when Typ.equal classpath_ft field_type ->
       fields
@@ -177,16 +180,18 @@ let collect_models_class_fields classpath_field_map cn cf fields =
         field_type ;
       fields
   | None when Javalib.is_static_field (Javalib.ClassField cf) ->
-      ((field_name, field_type, annotation) :: static, nonstatic)
+      let field = Struct.mk_field field_name field_type ~annot:annotation in
+      (field :: static, nonstatic)
   | None ->
-      (static, (field_name, field_type, annotation) :: nonstatic)
+      let field = Struct.mk_field field_name field_type ~annot:annotation in
+      (static, field :: nonstatic)
 
 
 let add_model_fields classpath_fields cn =
   let statics, nonstatics = classpath_fields in
   let classpath_field_map =
     let collect_fields map =
-      List.fold ~f:(fun map (fn, ft, _) -> Fieldname.Map.add fn ft map) ~init:map
+      List.fold ~f:(fun map {Struct.name= fn; typ= ft} -> Fieldname.Map.add fn ft map) ~init:map
     in
     collect_fields (collect_fields Fieldname.Map.empty statics) nonstatics
   in
@@ -311,7 +316,7 @@ and get_class_struct_typ =
                   let super_classname = typename_of_classname super_cn in
                   super_classname :: interface_list
             in
-            let java_class_kind =
+            let java_class_kind : Struct.java_class_kind =
               if jclass.Javalib.c_abstract then Struct.AbstractClass else Struct.NormalClass
             in
             make_struct program tenv node supers ~fields ~statics annots ~java_class_kind name )
@@ -351,7 +356,7 @@ and value_type program tenv vt =
 let sizeof_of_object_type program tenv ot subtype =
   match (object_type program tenv ot).Typ.desc with
   | Typ.Tptr (typ, _) ->
-      Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype}
+      Exp.Sizeof {typ; nbytes= None; dynamic_length= None; subtype; nullable= false}
   | _ ->
       raise (Type_tranlsation_error "Pointer or array type expected in tenv")
 
@@ -368,8 +373,7 @@ let get_var_type_from_sig (context : JContext.t) var =
   let tenv = JContext.get_tenv context in
   List.find_map
     ~f:(fun (vt', var') ->
-      if JBir.var_equal var var' then Some (param_type program tenv context.cn var' vt') else None
-      )
+      if JBir.var_equal var var' then Some (param_type program tenv context.cn var' vt') else None )
     (JBir.params context.impl)
 
 

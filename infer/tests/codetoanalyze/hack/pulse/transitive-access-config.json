@@ -13,18 +13,23 @@
     },
     { "class_name_regex": "BadPattern" }
   ],
-  "contexts": [
+  "procnames_to_skip": [
     {
-      "initial_caller_class_extends": ["hack GlobalAccess::EventHandler"],
-      "initial_caller_class_does_not_extend": ["hack GlobalAccess::Unsafe"],
-      "tag": "Unsafe Globals",
-      "description": "The value is accessed in an unsafe context"
+      "class_names": ["GlobalAccess::C"],
+      "method_names": ["skip_me"]
     },
     {
-      "initial_caller_class_extends": ["hack GlobalAccess::EventHandler2"],
-      "initial_caller_class_does_not_extend": [],
-      "tag": "Low Pri Unsafe Globals",
-      "description": "Another description of unsafe context"
+      "class_names": ["GlobalAccess::B"],
+      "method_names": ["skip_me_too"]
+    }
+  ],
+  "contexts": [
+    {
+      "initial_caller_class_extends": ["GlobalAccess::EventHandler"],
+      "initial_caller_class_does_not_extend": ["GlobalAccess::Unsafe"],
+      "final_class_only": true,
+      "tag": "Unsafe Globals",
+      "description": "The value is accessed in an unsafe context"
     }
   ]
 }

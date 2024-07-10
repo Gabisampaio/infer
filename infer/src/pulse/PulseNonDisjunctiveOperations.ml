@@ -141,10 +141,10 @@ let is_modeled_as_cheap_to_copy tenv actual_typ =
       false
 
 
-let is_known_cheap_copy typ =
+let is_known_cheap_copy tenv typ =
   match typ.Typ.desc with
   | Tptr ({desc= Tstruct typename}, _) ->
-      CheapCopyTypes.is_known_cheap_copy typename
+      CheapCopyTypes.is_known_cheap_copy tenv typename
   | _ ->
       false
 
@@ -155,7 +155,7 @@ let rec get_fixed_size integer_widths tenv name =
   match Tenv.lookup tenv name with
   | Some {fields; dummy= false} ->
       let open IOption.Let_syntax in
-      List.fold fields ~init:(Some 0) ~f:(fun acc (_, {Typ.desc}, _) ->
+      List.fold fields ~init:(Some 0) ~f:(fun acc ({Struct.typ= {Typ.desc}} : Struct.field) ->
           let* acc in
           let+ size =
             match desc with
@@ -182,9 +182,9 @@ let is_smaller_than_64_bits integer_type_widths tenv typ =
 
 
 let is_cheap_to_copy_one integer_type_widths tenv typ =
-  (Typ.is_pointer typ && Typ.is_trivially_copyable (Typ.strip_ptr typ).quals)
+  (Typ.is_pointer typ && Tenv.is_trivially_copyable tenv (Typ.strip_ptr typ))
   || is_modeled_as_cheap_to_copy tenv typ
-  || is_known_cheap_copy typ
+  || is_known_cheap_copy tenv typ
   || is_smaller_than_64_bits integer_type_widths tenv typ
 
 
@@ -218,7 +218,8 @@ let continue_bind exec_state ~f =
   | AbortProgram _
   | ExitProgram _
   | LatentAbortProgram _
-  | LatentInvalidAccess _ ->
+  | LatentInvalidAccess _
+  | LatentSpecializedTypeIssue _ ->
       None
 
 
@@ -315,7 +316,7 @@ let add_copies_to_pvar_or_field ~is_captured_by_ref proc_lvalue_ref_parameters i
         | Unknown _ when is_copy_into_local copied_var ->
             (* case 3: analogous to case 1 but source is an unknown call that is known to create a copy *)
             Some (IntoVar {copied_var}, None)
-        | Unknown _ ->
+        | Unknown _ | SourceExpr ((Block _, _), _) ->
             (* case 4: analogous to case 2 but source is an unknown call that is known to create a copy *)
             Some (IntoIntermediate {copied_var}, None)
         | SourceExpr (((ReturnValue _, _) as source_expr), _) ->
@@ -461,6 +462,8 @@ let add_copies integer_type_widths tenv proc_desc path location pname actuals ~a
 let is_lock pname =
   let method_name = Procname.get_method pname in
   String.equal method_name "lock" || String.equal method_name "rlock"
+  || String.is_suffix method_name ~suffix:"_lock"
+  || String.is_suffix method_name ~suffix:"_trylock"
 
 
 let get_copied_into copied_var : Attribute.CopiedInto.t =
@@ -525,21 +528,9 @@ let call integer_type_widths tenv proc_desc path loc ~call_exp ~actuals ~astates
       (astate_n, astates)
 
 
-let is_folly_coro =
-  let matcher =
-    QualifiedCppName.Match.of_fuzzy_qual_names ["folly::coro::Generator"; "folly::coro::Task"]
-  in
-  fun typ ->
-    match typ.Typ.desc with
-    | Tptr ({desc= Tstruct (CppClass {name})}, _) ->
-        QualifiedCppName.Match.match_qualifiers matcher name
-    | _ ->
-        false
-
-
 let init_const_refable_parameters procdesc integer_type_widths tenv astates astate_n =
   if
-    Option.exists (Procdesc.get_ret_param_type procdesc) ~f:is_folly_coro
+    Option.exists (Procdesc.get_ret_param_type procdesc) ~f:Typ.is_folly_coro
     || Procname.is_lambda_or_block (Procdesc.get_proc_name procdesc)
   then astate_n
   else
@@ -611,7 +602,7 @@ let is_modified_since_detected addr ~is_param ~get_repr ~current_heap astate ~co
               ||
               let addr_to_explore =
                 UnsafeMemory.Edges.fold edges_curr ~init:addr_to_explore
-                  ~f:(fun acc (_, (addr, _)) -> addr :: acc)
+                  ~f:(fun acc (_, (addr, _)) -> addr :: acc )
               in
               aux ~addr_to_explore ~visited )
   in
@@ -687,7 +678,7 @@ let mark_modified_copies_and_parameters_on_abductive vars astate astate_n =
 
 let mark_modified_copies_and_parameters vars astates astate_n =
   let unchecked_vars =
-    List.filter vars ~f:(fun var -> not (NonDisjDomain.is_checked_via_dtor var astate_n))
+    List.filter vars ~f:(fun var -> not (NonDisjDomain.is_checked_via_destructor var astate_n))
   in
   continue_fold astates ~init:astate_n ~f:(fun astate_n astate ->
       mark_modified_copies_and_parameters_on_abductive unchecked_vars astate astate_n )

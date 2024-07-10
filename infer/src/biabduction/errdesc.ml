@@ -121,7 +121,7 @@ let rec find_normal_variable_load_ tenv (seen : Exp.Set.t) node id : DExp.t opti
            propagation. previously, we would have code like:
            n1 = foo(); x = n1; n2 = x; n2.toString(), but copy-propagation will optimize this to:
            n1 = foo(); x = n1; n1.toString(). This case allows us to recognize the association
-           between n1 and x. Eradicate/checkers don't use copy-prop, so they don't need this. *)
+           between n1 and x. Checkers don't use copy-prop, so they don't need this. *)
         Some (DExp.Dpvar pvar)
     | _ ->
         None
@@ -519,8 +519,10 @@ let vpath_find tenv prop exp_ : DExp.t option * Typ.t option =
                 | Exp.Sizeof {typ= {Typ.desc= Tstruct name}} -> (
                   match Tenv.lookup tenv name with
                   | Some {fields} ->
-                      List.find ~f:(fun (f', _, _) -> Fieldname.equal f' f) fields
-                      |> Option.map ~f:snd3
+                      let field =
+                        List.find ~f:(fun {Struct.name= f'} -> Fieldname.equal f' f) fields
+                      in
+                      Option.map ~f:(fun ({Struct.typ} : Struct.field) -> typ) field
                   | _ ->
                       None )
                 | _ ->
@@ -1078,14 +1080,6 @@ let explain_divide_by_zero tenv exp node loc =
       Localise.desc_divide_by_zero exp_str loc
   | None ->
       Localise.no_desc
-
-
-(** explain a condition which is always true or false *)
-let explain_condition_always_true_false tenv i cond node loc =
-  let cond_str_opt =
-    match exp_rv_dexp tenv node cond with Some de -> Some (DExp.to_string de) | None -> None
-  in
-  Localise.desc_condition_always_true_false i cond_str_opt loc
 
 
 let warning_err loc fmt_string =

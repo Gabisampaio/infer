@@ -174,7 +174,7 @@ let should_report_guardedby_violation classname ({snapshot; tenv; procname} : re
     | _ ->
         false
   in
-  let field_is_annotated_guardedby field_name (f, _, a) =
+  let field_is_annotated_guardedby field_name {Struct.name= f; annot= a} =
     Fieldname.equal f field_name
     && List.exists a ~f:(fun (annot : Annot.t) ->
            Annotations.annot_ends_with annot Annotations.guarded_by
@@ -339,7 +339,7 @@ let report_thread_safety_violation ~make_description ~report_kind
 
 
 let report_unannotated_interface_violation reported_pname reported_access issue_log =
-  match Procname.base_of reported_pname with
+  match reported_pname with
   | Procname.Java java_pname ->
       let class_name = Procname.Java.get_class_name java_pname in
       let make_description _ _ _ _ =
@@ -371,16 +371,15 @@ let make_read_write_race_description ~read_is_sync (conflict : reported_access) 
   let pp_conflict fmt {procname} =
     F.pp_print_string fmt (Procname.to_simplified_string ~withclass:true procname)
   in
-  let conflicts_description =
-    Format.asprintf "Potentially races with%s write in method %a"
-      (if read_is_sync then " unsynchronized" else "")
-      (MF.wrap_monospaced pp_conflict) conflict
-  in
-  Format.asprintf "Read/Write race. Non-private method %a%s reads%s from %a. %s." describe_pname
-    pname
+  Format.asprintf
+    "Read/Write race. Non-private method %a%s reads%s from %a, which races with the%s write in \
+     method %a."
+    describe_pname pname
     (if CallSite.equal final_sink_site initial_sink_site then "" else " indirectly")
     (if read_is_sync then " with synchronization" else " without synchronization")
-    pp_access final_sink conflicts_description
+    pp_access final_sink
+    (if read_is_sync then " unsynchronized" else "")
+    (MF.wrap_monospaced pp_conflict) conflict
 
 
 let make_guardedby_violation_description pname final_sink_site initial_sink_site final_sink =
@@ -504,7 +503,7 @@ let report_unsafe_access_objc_cpp accesses acc ({snapshot} as reported_access) =
 
 (** report hook dispatching to language specific functions *)
 let report_unsafe_access accesses acc ({procname} as reported_access) =
-  match (Procname.base_of procname : Procname.t) with
+  match (procname : Procname.t) with
   | Java _ | CSharp _ ->
       report_unsafe_access_java_csharp accesses acc reported_access
   | ObjC_Cpp _ ->
@@ -575,7 +574,7 @@ let should_report_on_proc file_exe_env proc_name =
   |> Option.exists ~f:(fun attrs ->
          let tenv = Exe_env.get_proc_tenv file_exe_env proc_name in
          let is_not_private = not ProcAttributes.(equal_access (get_access attrs) Private) in
-         match (Procname.base_of proc_name : Procname.t) with
+         match (proc_name : Procname.t) with
          | CSharp _ ->
              is_not_private
          | Java java_pname ->
@@ -636,7 +635,7 @@ let should_report_on_class (classname : Typ.Name.t) class_summaries =
       true
   | CppClass _ | ObjcClass _ | ObjcProtocol _ | CStruct _ ->
       class_has_concurrent_method class_summaries
-  | CUnion _ | ErlangType _ | HackClass _ | PythonClass _ ->
+  | CUnion _ | ErlangType _ | HackClass _ | PythonClass _ | ObjcBlock _ | CFunction _ ->
       false
 
 
@@ -646,7 +645,7 @@ let aggregate_by_class {InterproceduralAnalysis.procedures; analyze_file_depende
   List.fold procedures ~init:Typ.Name.Map.empty ~f:(fun acc procname ->
       Procname.get_class_type_name procname
       |> Option.bind ~f:(fun classname ->
-             analyze_file_dependency procname
+             analyze_file_dependency procname |> AnalysisResult.to_option
              |> Option.map ~f:(fun summary ->
                     Typ.Name.Map.update classname
                       (fun summaries_opt ->
@@ -678,7 +677,7 @@ let get_synchronized_container_fields_of analyze tenv classname =
            Procname.Java.(is_class_initializer j || is_constructor j)
        | _ ->
            false )
-  |> List.rev_filter_map ~f:analyze
+  |> List.rev_filter_map ~f:(fun proc_name -> analyze proc_name |> AnalysisResult.to_option)
   |> List.rev_map ~f:(fun (summary : summary) -> summary.attributes)
   |> List.fold ~init:Fieldname.Set.empty ~f:(fun acc attributes ->
          AttributeMapDomain.fold add_synchronized_container_field attributes acc )

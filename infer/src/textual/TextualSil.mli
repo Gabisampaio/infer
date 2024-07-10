@@ -8,7 +8,7 @@
 open! IStd
 
 val proc_decl_to_sil : Textual.Lang.t -> Textual.ProcDecl.t -> Procname.t
-  [@@warning "-unused-value-declaration"]
+[@@warning "-unused-value-declaration"]
 
 val module_to_sil : Textual.Module.t -> Cfg.t * Tenv.t
 
@@ -32,9 +32,15 @@ val hack_bool_type_name : Typ.name
 
 val hack_int_type_name : Typ.name
 
+val hack_float_type_name : Typ.name
+
 val hack_string_type_name : Typ.name
 
+val hack_splated_vec_type_name : Typ.name
+
 val hack_mixed_type_name : Typ.name
+
+val hack_awaitable_type_name : Typ.name
 
 val hack_mixed_static_companion_type_name : Typ.name
 

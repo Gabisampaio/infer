@@ -29,8 +29,6 @@ let alloc = "alloc"
 
 let allocWithZone = "allocWithZone:"
 
-let anon_field = "__anon_field"
-
 let arrayWithObjects_count = "arrayWithObjects:count:"
 
 let dictionaryWithObjects_forKeys_count = "dictionaryWithObjects:forKeys:count:"
@@ -121,16 +119,6 @@ let sil_types_map = ref Clang_ast_extend.TypePointerMap.empty
 let procedures_attempted = ref 0
 
 let procedures_failed = ref 0
-
-(** Global counter for anonymous block*)
-let block_counter = ref 0
-
-let get_fresh_block_index () =
-  block_counter := !block_counter + 1 ;
-  !block_counter
-
-
-let reset_block_counter () = block_counter := 0
 
 let reset_global_state () =
   enum_map := ClangPointers.Map.empty ;

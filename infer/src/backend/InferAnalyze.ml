@@ -11,6 +11,7 @@
 open! IStd
 module F = Format
 module L = Logging
+open TaskSchedulerTypes
 
 (** do a compaction only if a sufficient amount of time has passed since last compaction *)
 let compaction_minimum_interval_ns =
@@ -61,19 +62,28 @@ let proc_name_of_uid uid =
       L.die InternalError "Requested non-existent proc_uid: %s@." uid
 
 
-let analyze_target : (TaskSchedulerTypes.target, string) Tasks.doer =
+let useful_time = ref ExecutionDuration.zero
+
+let analyze_target : (TaskSchedulerTypes.target, TaskSchedulerTypes.analysis_result) Tasks.doer =
+  let run_and_interpret_result ~f =
+    try
+      f () ;
+      Some Ok
+    with
+    | RestartSchedulerException.ProcnameAlreadyLocked {dependency_filename} ->
+        Some (RaceOn {dependency_filename})
+    | MissingDependencyException.MissingDependencyException ->
+        Some Ok
+  in
   let analyze_source_file exe_env source_file =
     DB.Results_dir.init source_file ;
     L.task_progress SourceFile.pp source_file ~f:(fun () ->
-        try
-          Ondemand.analyze_file exe_env source_file ;
-          if Config.write_html then Printer.write_all_html_files source_file ;
-          None
-        with
-        | RestartSchedulerException.ProcnameAlreadyLocked {dependency_filename} ->
-            Some dependency_filename
-        | MissingDependencyException.MissingDependencyException ->
-            None )
+        let result =
+          run_and_interpret_result ~f:(fun () ->
+              Ondemand.analyze_file exe_env AnalysisRequest.all source_file )
+        in
+        if Config.write_html then Printer.write_all_html_files source_file ;
+        result )
   in
   (* In call-graph scheduling, log progress every [per_procedure_logging_granularity] procedures.
      The default roughly reflects the average number of procedures in a C++ file. *)
@@ -86,16 +96,11 @@ let analyze_target : (TaskSchedulerTypes.target, string) Tasks.doer =
       L.log_task "Analysing block of %d procs, starting with %a@." per_procedure_logging_granularity
         Procname.pp proc_name ;
       procs_left := per_procedure_logging_granularity ) ;
-    try
-      Ondemand.analyze_proc_name_toplevel exe_env proc_name ;
-      None
-    with
-    | RestartSchedulerException.ProcnameAlreadyLocked {dependency_filename} ->
-        Some dependency_filename
-    | MissingDependencyException.MissingDependencyException ->
-        None
+    run_and_interpret_result ~f:(fun () ->
+        Ondemand.analyze_proc_name_toplevel exe_env AnalysisRequest.all proc_name )
   in
   fun target ->
+    let start = ExecutionDuration.counter () in
     let exe_env = Exe_env.mk () in
     let result =
       match target with
@@ -110,6 +115,7 @@ let analyze_target : (TaskSchedulerTypes.target, string) Tasks.doer =
        release memory before potentially going idle *)
     clear_caches () ;
     do_compaction_if_needed () ;
+    useful_time := ExecutionDuration.add_duration_since !useful_time start ;
     result
 
 
@@ -193,6 +199,7 @@ let analyze replay_call_graph source_files_to_analyze =
   if Config.is_checker_enabled ConfigImpactAnalysis then
     L.debug Analysis Quiet "Config impact strict mode: %a@." ConfigImpactAnalysis.pp_mode
       ConfigImpactAnalysis.mode ;
+  RestartScheduler.setup () ;
   if Int.equal Config.jobs 1 then (
     let target_files =
       List.rev_map (Lazy.force source_files_to_analyze) ~f:(fun sf -> TaskSchedulerTypes.File sf)
@@ -211,7 +218,6 @@ let analyze replay_call_graph source_files_to_analyze =
       tasks_generator_builder_for replay_call_graph (Lazy.force source_files_to_analyze)
     in
     (* Prepare tasks one file at a time while executing in parallel *)
-    RestartScheduler.setup () ;
     let allocation_traces_dir = ResultsDir.get_path AllocationTraces in
     if Config.memtrace_analysis then (
       Utils.create_dir allocation_traces_dir ;
@@ -222,9 +228,11 @@ let analyze replay_call_graph source_files_to_analyze =
     let runner =
       (* use a ref to pass data from prologue to epilogue without too much machinery *)
       let gc_stats_pre_fork = ref None in
+      let process_times_counter = ref None in
       let child_prologue _ =
         Stats.reset () ;
         gc_stats_pre_fork := Some (GCStats.get ~since:ProgramStart) ;
+        process_times_counter := Some (ExecutionDuration.counter ()) ;
         if Config.memtrace_analysis then
           let filename =
             allocation_traces_dir ^/ F.asprintf "memtrace.%a" Pid.pp (Unix.getpid ())
@@ -242,6 +250,15 @@ let analyze replay_call_graph source_files_to_analyze =
               L.internal_error "child did not store GC stats in its prologue, what happened?" ;
               None
         in
+        let () =
+          match !process_times_counter with
+          | Some counter ->
+              Stats.set_process_times (ExecutionDuration.since counter)
+          | None ->
+              L.internal_error
+                "Child did not start the process times counter in its prologue, what happened?"
+        in
+        Stats.set_useful_times !useful_time ;
         (Stats.get (), gc_stats_in_fork, MissingDependencies.get ())
       in
       ScubaLogging.log_count ~label:"num_analysis_workers" ~value:Config.jobs ;
@@ -304,6 +321,10 @@ let main ~changed_files =
   let analysis_duration = ExecutionDuration.since start in
   L.debug Analysis Quiet "Analysis phase finished in %a@\n" Mtime.Span.pp
     (ExecutionDuration.wall_time analysis_duration) ;
+  if Config.reactive_capture then
+    ReactiveCapture.store_missed_captures
+      ~source_files_filter:(source_file_should_be_analyzed ~changed_files)
+      () ;
   ExecutionDuration.log ~prefix:"backend_stats.scheduler_process_analysis_time" Analysis
     analysis_duration ;
   (* delete any previous analysis schedule once the new analysis has finished to avoid keeping a

@@ -6,14 +6,98 @@
  *)
 
 open! IStd
+open LineageShape.StdModules
+
+module PPNode : sig
+  type t
+end
+
+module Local : sig
+  type t
+end
+
+module Vertex : sig
+  type t =
+    | Local of (Local.t * PPNode.t)
+    | Argument of int * FieldPath.t
+    | ArgumentOf of Procname.t * int * FieldPath.t
+    | Captured of int
+    | CapturedBy of Procname.t * int
+    | Return of FieldPath.t
+    | ReturnOf of Procname.t * FieldPath.t
+    | Self
+    | Function of Procname.t
+
+  val pp : t Fmt.t [@@warning "-unused-value-declaration"]
+end
+
+module Edge : sig
+  module Kind : sig
+    type t =
+      | Direct  (** Immediate copy; e.g., assigment or passing an argument *)
+      | Call  (** Target is ArgumentOf *)
+      | Return  (** Source is ReturnOf *)
+      | Capture  (** [X=1, F=fun()->X end] has Capture edge from X to F *)
+      | Builtin  (** Edge coming from a suppressed builtin call, ultimately exported as a Copy *)
+      | Summary of {callee: Procname.t; shape_is_preserved: bool}
+          (** Summarizes the effect of a procedure call *)
+      | DynamicCallFunction
+      | DynamicCallModule
+  end
+
+  type kind = Kind.t
+
+  type t
+
+  val kind : t -> kind
+end
+
+module G : sig
+  include Graph.Sig.P with type V.t = Vertex.t and type E.label = Edge.t
+
+  val pp : t Fmt.t [@@warning "-unused-value-declaration"]
+
+  val of_vertices : vertex list -> t
+end
+
+module Unified : sig
+  module UVertex : sig
+    type v =
+      | Local of Local.t * PPNode.t
+      | Argument of int * FieldPath.t
+      | Return of FieldPath.t
+      | Captured of int
+      | Function
+    [@@deriving sexp, compare, equal, hash]
+
+    type t = {procname: Procname.t; vertex: v} [@@deriving sexp, compare, equal, hash]
+  end
+
+  module LocalG := G
+
+  module G : Graph.Sig.P with type V.t = UVertex.t and type E.label = Edge.t
+
+  val transform_e :
+    (Procname.t -> LineageShape.Summary.t option) -> Procname.t -> LocalG.edge -> G.edge list
+
+  module Dot : sig
+    val output_graph : Stdlib.out_channel -> G.t -> unit
+  end
+end
 
 module Summary : sig
   type t
 
   val pp : Format.formatter -> t -> unit
 
-  val report : t -> Procdesc.t -> unit
+  val graph : t -> G.t
+end
+
+module Out : sig
+  val report_summary : Procdesc.t -> Summary.t -> unit
 end
 
 val checker :
-  Summary.t InterproceduralAnalysis.t -> LineageShape.Summary.t option -> Summary.t option
+     (Summary.t option * LineageShape.Summary.t option) InterproceduralAnalysis.t
+  -> LineageShape.Summary.t option
+  -> Summary.t option

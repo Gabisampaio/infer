@@ -7,4 +7,6 @@
 
 open! IStd
 
-val report : unit -> unit
+val report_json : unit -> unit
+
+val report_taint : LineageTaint.TaintConfig.t -> unit

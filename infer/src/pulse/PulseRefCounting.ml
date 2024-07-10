@@ -9,6 +9,38 @@ open! IStd
 open PulseBasicInterface
 open PulseDomainInterface
 
+let is_ref_counted v astate =
+  AddressAttributes.get_static_type v astate
+  |> Option.exists ~f:(fun typ_name -> Typ.Name.is_objc_class typ_name)
+  ||
+  match PulseArithmetic.get_dynamic_type v astate with
+  | Some {typ= {desc= Tstruct typ_name}} ->
+      Typ.Name.is_objc_class typ_name
+  | _ ->
+      false
+
+
+type access_type = Strong | Weak | Unknown [@@deriving compare, equal]
+
+let pp_access_type fmt access_type =
+  let s = match access_type with Strong -> "Strong" | Weak -> "Weak" | Unknown -> "Unknown" in
+  String.pp fmt s
+
+
+let get_access_type _tenv (access : Access.t) : access_type =
+  match access with
+  | FieldAccess fieldname -> (
+    match Fieldname.is_weak fieldname with
+    | Some is_weak ->
+        if is_weak then Weak else Strong
+    | None ->
+        Unknown )
+  | _ ->
+      Strong
+
+
+let is_strong_access tenv access = equal_access_type (get_access_type tenv access) Strong
+
 (* Starting from each variable in the stack, count all unique strong
    references to each RefCounted object. If a RefCounted object lives in the
    stack but has no strong reference, then it considered as strongly
@@ -18,16 +50,16 @@ let count_references tenv astate =
     if AbstractValue.Set.mem addr seen then (seen, ref_counts)
     else
       let ref_counts =
-        if PulseOperations.is_ref_counted addr astate then
+        if is_ref_counted addr astate then
           AbstractValue.Map.update addr (function None -> Some 0 | some -> some) ref_counts
         else ref_counts
       in
       let seen = AbstractValue.Set.add addr seen in
       Memory.fold_edges addr astate ~init:(seen, ref_counts)
         ~f:(fun (seen, ref_counts) (access, (accessed_addr, _)) ->
-          if Access.is_strong_access tenv access then
+          if is_strong_access tenv access then
             let ref_counts =
-              if PulseOperations.is_ref_counted accessed_addr astate then
+              if is_ref_counted accessed_addr astate then
                 AbstractValue.Map.update accessed_addr
                   (function None -> Some 1 | Some n -> Some (n + 1))
                   ref_counts
@@ -53,7 +85,7 @@ let is_released tenv astate addr non_retaining_addrs =
     if List.mem seen src_addr ~equal:AbstractValue.equal then false
     else
       Memory.exists_edge src_addr astate ~f:(fun (access, (accessed_addr, _)) ->
-          Access.is_strong_access tenv access
+          is_strong_access tenv access
           && ( AbstractValue.equal accessed_addr addr
              || is_retained_by accessed_addr (src_addr :: seen) ) )
   in
@@ -82,8 +114,7 @@ let removable_vars tenv astate vars =
     List.filter_map vars ~f:(fun var -> Stack.find_opt var astate |> Option.map ~f:fst)
   in
   let is_removable addr =
-    (not (PulseOperations.is_ref_counted addr astate))
-    || is_released tenv astate addr non_retaining_addrs
+    (not (is_ref_counted addr astate)) || is_released tenv astate addr non_retaining_addrs
   in
   List.filter vars ~f:(fun var ->
       Stack.find_opt var astate |> Option.for_all ~f:(fun (addr, _) -> is_removable addr) )

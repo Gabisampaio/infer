@@ -15,28 +15,26 @@ module F = Format
 type mode =
   | Analyze
   | Ant of {prog: string; args: string list}
-  | Buck2Clang of {build_cmd: string list}
   | BuckClangFlavor of {build_cmd: string list}
   | BuckCompilationDB of {deps: BuckMode.clang_compilation_db_deps; prog: string; args: string list}
   | BuckErlang of {prog: string; args: string list}
   | BuckGenrule of {prog: string}
   | BuckJavaFlavor of {build_cmd: string list}
   | BxlClang of {build_cmd: string list}
-  | BxlClangFile
   | BxlJava of {build_cmd: string list}
   | Clang of {compiler: Clang.compiler; prog: string; args: string list}
   | ClangCompilationDB of {db_files: [`Escaped of string | `Raw of string] list}
+  | Erlc of {args: string list}
   | Gradle of {prog: string; args: string list}
+  | Hackc of {prog: string; args: string list}
   | Javac of {compiler: Javac.compiler; prog: string; args: string list}
-  | Kotlinc of {prog: string; args: string list}
   | JsonSIL of {cfg_json: string; tenv_json: string}
+  | Kotlinc of {prog: string; args: string list}
   | Maven of {prog: string; args: string list}
   | NdkBuild of {build_cmd: string list}
   | Python of {prog: string; args: string list}
   | PythonBytecode of {files: string list}
   | Rebar3 of {args: string list}
-  | Erlc of {args: string list}
-  | Hackc of {prog: string; args: string list}
   | Textual of {textualfiles: string list}
   | XcodeBuild of {prog: string; args: string list}
   | XcodeXcpretty of {prog: string; args: string list}
@@ -55,8 +53,6 @@ let pp_mode fmt = function
       F.fprintf fmt "Analyze driver mode"
   | Ant {prog; args} ->
       F.fprintf fmt "Ant driver mode:@\nprog = '%s'@\nargs = %a" prog Pp.cli_args args
-  | Buck2Clang {build_cmd} ->
-      F.fprintf fmt "Buck2/Clang driver mode: build_cmd = %a" Pp.cli_args build_cmd
   | BuckClangFlavor {build_cmd} ->
       F.fprintf fmt "BuckClangFlavor driver mode: build_cmd = %a" Pp.cli_args build_cmd
   | BuckCompilationDB {deps; prog; args} ->
@@ -70,8 +66,6 @@ let pp_mode fmt = function
       F.fprintf fmt "BuckJavaFlavor driver mode:@\nbuild command = %a" Pp.cli_args build_cmd
   | BxlClang {build_cmd} ->
       F.fprintf fmt "BxlClang driver mode:@\nbuild command = %a" Pp.cli_args build_cmd
-  | BxlClangFile ->
-      F.fprintf fmt "BxlClang file driver mode"
   | BxlJava {build_cmd} ->
       F.fprintf fmt "BxlJava driver mode:@\nbuild command = %a" Pp.cli_args build_cmd
   | Clang {prog; args} ->
@@ -158,9 +152,6 @@ let capture ~changed_files mode =
       | Ant {prog; args} ->
           L.progress "Capturing in ant mode...@." ;
           Ant.capture ~prog ~args
-      | Buck2Clang {build_cmd} ->
-          L.progress "Capturing in buck2/clang mode...@." ;
-          Buck2Clang.capture build_cmd
       | BuckClangFlavor {build_cmd} ->
           L.progress "Capturing in buck mode...@." ;
           BuckFlavors.capture build_cmd
@@ -182,9 +173,6 @@ let capture ~changed_files mode =
       | BxlClang {build_cmd} ->
           L.progress "Capturing in bxl/clang mode...@." ;
           BxlCapture.capture build_cmd
-      | BxlClangFile ->
-          L.progress "Capturing in bxl/clang file mode...@." ;
-          BxlCapture.file_capture ()
       | BxlJava {build_cmd} ->
           L.progress "Capturing in bxl/java mode...@." ;
           BxlCapture.capture build_cmd
@@ -242,13 +230,7 @@ let capture ~changed_files mode =
           CaptureCompilationDatabase.capture ~changed_files ~db_files ) ;
   let should_merge =
     match mode with
-    | Buck2Clang _
-    | BuckClangFlavor _
-    | BuckJavaFlavor _
-    | BxlClang _
-    | BxlClangFile
-    | BxlJava _
-    | Gradle _ ->
+    | BuckClangFlavor _ | BuckJavaFlavor _ | BxlClang _ | BxlJava _ | Gradle _ ->
         true
     | _ ->
         not (List.is_empty Config.merge_capture)
@@ -256,11 +238,7 @@ let capture ~changed_files mode =
   if should_merge then (
     if Config.export_changed_functions then MergeCapture.merge_changed_functions () ;
     let root =
-      match mode with
-      | Buck2Clang _ | BxlClang _ | BxlClangFile | BxlJava _ ->
-          Config.buck2_root
-      | _ ->
-          Config.project_root
+      match mode with BxlClang _ | BxlJava _ -> Config.buck2_root | _ -> Config.project_root
     in
     MergeCapture.merge_captured_targets ~root )
 
@@ -312,10 +290,6 @@ let report () =
     if Config.sarif then
       SarifReport.create_from_json ~report_sarif:(ResultsDir.get_path ReportSarif)
         ~report_json:issues_json ;
-    if Config.is_checker_enabled Checker.Datalog then
-      DatalogFacts.create_from_json
-        ~datalog_dir:(ResultsDir.get_path DatalogFacts)
-        ~report_json:issues_json ;
     () ) ;
   if Config.export_changed_functions then TestDeterminator.merge_changed_functions_results () ;
   if Config.(test_determinator && process_clang_ast) then
@@ -358,6 +332,8 @@ let analyze_and_report ~changed_files mode =
   | (Capture | Compile | Debug | Explore | Help | Report | ReportDiff), _ ->
       ()
   | (Analyze | Run), _ when Config.invalidate_only ->
+      ()
+  | (Analyze | Run), Hackc _ when Config.hack_verify_capture_only ->
       ()
   | (Analyze | Run), _ ->
       if SourceFiles.is_empty () then error_nothing_to_analyze mode
@@ -484,8 +460,6 @@ let assert_supported_build_system build_system =
 
 let mode_of_build_command build_cmd (buck_mode : BuckMode.t option) =
   match build_cmd with
-  | [] when Config.bxl_file_capture ->
-      BxlClangFile
   | [] when not (List.is_empty Config.pyc_file) ->
       PythonBytecode {files= Config.pyc_file}
   | [] -> (
@@ -537,13 +511,11 @@ let mode_of_build_command build_cmd (buck_mode : BuckMode.t option) =
         match buck_mode with
         | None ->
             error_no_buck_mode_specified ()
-        | Some Clang when Config.buck2_use_bxl ->
-            BxlClang {build_cmd}
         | Some Clang ->
-            Buck2Clang {build_cmd}
+            BxlClang {build_cmd}
         | Some Erlang ->
             BuckErlang {prog; args}
-        | Some Java when Config.buck2_use_bxl ->
+        | Some Java ->
             BxlJava {build_cmd}
         | Some buck_mode ->
             L.die UserError "%a is not supported with buck2.@." BuckMode.pp buck_mode )
@@ -614,6 +586,7 @@ let run_prologue mode =
 
 
 let run_epilogue () =
+  GCStats.log ~name:"main_process_full" Analysis (GCStats.get ~since:ProgramStart) ;
   if Config.is_originator then (
     if Config.fail_on_bug then fail_on_issue_epilogue () ;
     () ) ;
@@ -621,6 +594,18 @@ let run_epilogue () =
   ()
 
 
-let run_epilogue () =
-  GCStats.log ~name:"main_process_full" Analysis (GCStats.get ~since:ProgramStart) ;
-  ScubaLogging.execute_with_time_logging "run_epilogue" run_epilogue
+let run driver_mode =
+  if Config.dump_textual && not (is_compatible_with_textual_generation driver_mode) then
+    L.die UserError "ERROR: Textual generation is only allowed in Java and Python mode currently" ;
+  run_prologue driver_mode ;
+  let changed_files = SourceFile.read_config_files_to_analyze () in
+  capture driver_mode ~changed_files ;
+  if Config.incremental_analysis then AnalysisDependencyGraph.invalidate ~changed_files ;
+  analyze_and_report driver_mode ~changed_files ;
+  ()
+
+
+let run driver_mode =
+  ScubaLogging.execute_with_time_logging "run" (fun () -> run driver_mode) ;
+  (* logging should finish before we run the epilogue *)
+  run_epilogue ()

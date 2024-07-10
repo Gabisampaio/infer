@@ -9,6 +9,83 @@ open! IStd
 module L = Logging
 module F = Format
 
+module ServerSocket = struct
+  let socket_name = ResultsDirEntryName.db_writer_socket_name
+
+  let socket_addr = Unix.ADDR_UNIX socket_name
+
+  let socket_domain = Unix.domain_of_sockaddr socket_addr
+
+  (** Unix socket *paths* have a historical length limit of ~100 chars (!?*@&*$). However, this only
+      applies to the argument passed in the system call to create the socket, not to the actual
+      path. Thus a workaround is to cd into the parent dir of the socket and then use it, hence this
+      function. *)
+  let in_results_dir ~f = Utils.do_in_dir ~dir:Config.toplevel_results_dir ~f
+
+  let socket_exists () = in_results_dir ~f:(fun () -> Sys.file_exists_exn socket_name)
+
+  (* Error recuperation is done by attempting this function at module initialization time, and
+     not using DbWriter at all in case it fails. See {!can_use_socket} below. *)
+  let setup_socket () =
+    if socket_exists () then L.die InternalError "Sqlite write daemon: socket already exists@." ;
+    let socket = Unix.socket ~domain:socket_domain ~kind:SOCK_STREAM ~protocol:0 () in
+    in_results_dir ~f:(fun () -> Unix.bind socket ~addr:socket_addr) ;
+    (* [backlog] is (supposedly) the length of the queue for pending connections ;
+       there are no rules about the implied behaviour though.  Here use optimistically
+       the number of workers, though even that is a guess. *)
+    Unix.listen socket ~backlog:Config.jobs ;
+    socket
+
+
+  let remove_socket_file () =
+    in_results_dir ~f:(fun () -> if socket_exists () then Unix.unlink socket_name)
+
+
+  let remove_socket socket =
+    in_results_dir ~f:(fun () -> Unix.close socket) ;
+    remove_socket_file ()
+
+
+  (* Check whether we can create a socket to communicate with the asynchronous DBWriter process. *)
+  let can_use_socket () =
+    try
+      (* This function is called very early, and the infer-out directory may not have been created
+         yet. Ensure it exists before attempting to create the socket. *)
+      Unix.mkdir_p Config.toplevel_results_dir ;
+      let socket = setup_socket () in
+      remove_socket socket ;
+      true
+    with _ -> false
+end
+
+let default_use_daemon =
+  lazy
+    (let is_windows =
+       match Version.build_platform with Windows -> true | Linux | Darwin -> false
+     in
+     Config.((not is_windows) && dbwriter && (not (buck || genrule_mode)) && jobs > 1)
+     &&
+     (* Only the main process should try detecting whether the socket can be created.
+        Otherwise, re-spawned Infer will try to create a socket on top of the existing one. *)
+     if Config.is_originator then (
+       let socket_ok = ServerSocket.can_use_socket () in
+       if not socket_ok then
+         L.user_warning
+           "Cannot setup the socket to communicate with the database daemon. Performance will be \
+            impacted. Do you have enough rights to create a Unix socket in directory '%s'?@."
+           Config.toplevel_results_dir ;
+       socket_ok )
+     else ServerSocket.socket_exists () )
+
+
+let override_daemon_ref = ref None
+
+let override_use_daemon should_use = override_daemon_ref := Some should_use
+
+let use_daemon () =
+  Option.value_or_thunk !override_daemon_ref ~default:(fun () -> Lazy.force default_use_daemon)
+
+
 module Implementation = struct
   let add_source_file =
     let source_file_store_statement =
@@ -82,10 +159,8 @@ module Implementation = struct
           SqliteUtils.result_unit ~finalize:false ~log:"delete spec" db delete_stmt )
     in
     fun ~proc_uids ->
-      let db = Database.get_database AnalysisDatabase in
-      SqliteUtils.exec db ~log:"begin transaction" ~stmt:"BEGIN TRANSACTION" ;
-      List.iter proc_uids ~f:(fun proc_uid -> delete_spec ~proc_uid) ;
-      SqliteUtils.exec db ~log:"commit transaction" ~stmt:"COMMIT"
+      SqliteUtils.transaction (Database.get_database AnalysisDatabase) ~f:(fun () ->
+          List.iter proc_uids ~f:(fun proc_uid -> delete_spec ~proc_uid) )
 
 
   let mark_all_source_files_stale () =
@@ -305,8 +380,46 @@ module Implementation = struct
     IntHash.create 10
 
 
+  let select_report_summary =
+    let select_statement =
+      Database.register_statement AnalysisDatabase
+        "SELECT report_summary FROM specs WHERE proc_uid = :proc_uid"
+    in
+    fun ~proc_uid ->
+      Database.with_registered_statement select_statement ~f:(fun db select_stmt ->
+          Sqlite3.bind_name select_stmt ":proc_uid" (TEXT proc_uid)
+          |> SqliteUtils.check_result_code db ~log:"select report summary proc_uid" ;
+          SqliteUtils.result_option ~finalize:false ~log:"select report summary"
+            ~read_row:(fun stmt -> Sqlite3.column stmt 0)
+            db select_stmt )
+
+
+  let select_pulse_spec =
+    let select_statement =
+      Database.register_statement AnalysisDatabase
+        {|
+          SELECT report_summary, summary_metadata, %s FROM specs
+          WHERE proc_uid = :proc_uid
+        |}
+        PayloadId.Variants.pulse.Variant.name
+    in
+    fun ~proc_uid ->
+      Database.with_registered_statement select_statement ~f:(fun db select_stmt ->
+          Sqlite3.bind_name select_stmt ":proc_uid" (TEXT proc_uid)
+          |> SqliteUtils.check_result_code db ~log:"select pulse spec proc_uid" ;
+          SqliteUtils.result_option ~finalize:false ~log:"select pulse spec"
+            ~read_row:(fun stmt ->
+              let report_summary = Sqlite3.column stmt 0 in
+              let summary_metadata = Sqlite3.column stmt 1 in
+              let pulse_payload = Sqlite3.column stmt 2 in
+              (report_summary, summary_metadata, pulse_payload) )
+            db select_stmt )
+
+
+  let store_sql_time = ref ExecutionDuration.zero
+
   let store_spec =
-    let store_statement =
+    let insert_or_replace_statement =
       Database.register_statement AnalysisDatabase
         {|
           INSERT OR REPLACE INTO specs
@@ -316,24 +429,90 @@ module Implementation = struct
            (Pp.seq ~sep:", " (fun fmt payload_name -> F.fprintf fmt ":%s" payload_name))
            PayloadId.database_fields )
     in
-    fun ~proc_uid ~proc_name ~payloads ~report_summary ~summary_metadata ->
+    let update_statement =
+      let stmts =
+        List.fold PayloadId.database_fields ~init:String.Map.empty ~f:(fun acc payload_id ->
+            String.Map.add_exn ~key:payload_id
+              ~data:
+                (Database.register_statement AnalysisDatabase
+                   {|
+                     UPDATE specs SET
+                       report_summary = :report_summary,
+                       summary_metadata = :summary_metadata,
+                       %s = :value
+                     WHERE proc_uid = :proc_uid
+                   |}
+                   payload_id )
+              acc )
+      in
+      fun payload_id -> String.Map.find_exn stmts (PayloadId.Variants.to_name payload_id)
+    in
+    fun analysis_req ~proc_uid ~proc_name ~merge_pulse_payload ~merge_report_summary
+        ~merge_summary_metadata ->
       let proc_uid_hash = String.hash proc_uid in
       IntHash.find_opt specs_overwrite_counts proc_uid_hash
       |> Option.value_map ~default:0 ~f:(( + ) 1)
       (* [default] is 0 as we are only counting overwrites *)
       |> IntHash.replace specs_overwrite_counts proc_uid_hash ;
-      Database.with_registered_statement store_statement ~f:(fun db store_stmt ->
-          Sqlite3.bind_values store_stmt
-            ( Sqlite3.Data.TEXT proc_uid :: proc_name :: report_summary :: summary_metadata
-            :: payloads )
-          |> SqliteUtils.check_result_code db ~log:"store spec bind_values" ;
-          SqliteUtils.result_unit ~finalize:false ~log:"store spec" db store_stmt )
+      let now = ExecutionDuration.counter () in
+      let f () =
+        let found_old, old_report_summary, old_summary_metadata, old_pulse_payload =
+          match select_pulse_spec ~proc_uid with
+          | Some (report_summary, summary_metadata, pulse_payload) ->
+              (true, Some report_summary, Some summary_metadata, Some pulse_payload)
+          | None ->
+              (false, None, None, None)
+        in
+        let report_summary = merge_report_summary ~old_report_summary in
+        let summary_metadata = merge_summary_metadata ~old_summary_metadata in
+        let payloads = merge_pulse_payload ~old_pulse_payload in
+        let stmt, binds =
+          match (analysis_req : AnalysisRequest.t) with
+          | One payload_id when found_old ->
+              ( update_statement payload_id
+              , [ report_summary
+                ; summary_metadata
+                ; List.nth_exn payloads (PayloadId.Variants.to_rank payload_id)
+                ; Sqlite3.Data.TEXT proc_uid ] )
+          | One _ | All | CheckerWithoutPayload _ ->
+              ( insert_or_replace_statement
+              , Sqlite3.Data.TEXT proc_uid :: proc_name :: report_summary :: summary_metadata
+                :: payloads )
+        in
+        Database.with_registered_statement stmt ~f:(fun db store_stmt ->
+            Sqlite3.bind_values store_stmt binds
+            |> SqliteUtils.check_result_code db ~log:"store spec bind_values" ;
+            SqliteUtils.result_unit ~finalize:false ~log:"store spec" db store_stmt )
+      in
+      if use_daemon () then f ()
+      else SqliteUtils.transaction ~immediate:true (Database.get_database AnalysisDatabase) ~f ;
+      store_sql_time := ExecutionDuration.add_duration_since !store_sql_time now
 
 
   let terminate () =
     let overwrites = IntHash.fold (fun _hash count acc -> acc + count) specs_overwrite_counts 0 in
     ScubaLogging.log_count ~label:"overwritten_specs" ~value:overwrites ;
     L.debug Analysis Quiet "Detected %d spec overwrites.@\n" overwrites
+
+
+  let update_report_summary =
+    let store_statement =
+      Database.register_statement AnalysisDatabase
+        "UPDATE specs SET report_summary = :report_summary WHERE proc_uid = :proc_uid"
+    in
+    fun ~proc_uid ~merge_report_summary ->
+      let now = ExecutionDuration.counter () in
+      let f () =
+        let old_report_summary = select_report_summary ~proc_uid in
+        let report_summary = merge_report_summary ~old_report_summary in
+        Database.with_registered_statement store_statement ~f:(fun db store_stmt ->
+            Sqlite3.bind_values store_stmt [report_summary; Sqlite3.Data.TEXT proc_uid]
+            |> SqliteUtils.check_result_code db ~log:"store report summary bind_values" ;
+            SqliteUtils.result_unit ~finalize:false ~log:"store report summary" db store_stmt )
+      in
+      if use_daemon () then f ()
+      else SqliteUtils.transaction ~immediate:true (Database.get_database AnalysisDatabase) ~f ;
+      store_sql_time := ExecutionDuration.add_duration_since !store_sql_time now
 end
 
 module Command = struct
@@ -352,21 +531,25 @@ module Command = struct
     | MarkAllSourceFilesStale
     | MergeCaptures of {root: string; infer_deps_file: string}
     | MergeSummaries of {infer_outs: string list}
-    | ShrinkAnalysisDB
-    | StoreIssueLog of {checker: string; source_file: Sqlite3.Data.t; issue_log: Sqlite3.Data.t}
-    | StoreSpec of
-        { proc_uid: string
-        ; proc_name: Sqlite3.Data.t
-        ; payloads: Sqlite3.Data.t list
-        ; report_summary: Sqlite3.Data.t
-        ; summary_metadata: Sqlite3.Data.t }
     | ReplaceAttributes of
         { proc_uid: string
         ; proc_attributes: Sqlite3.Data.t
         ; cfg: Sqlite3.Data.t
         ; callees: Sqlite3.Data.t
         ; analysis: bool }
+    | ShrinkAnalysisDB
+    | StoreIssueLog of {checker: string; source_file: Sqlite3.Data.t; issue_log: Sqlite3.Data.t}
+    | StoreSpec of
+        { analysis_req: AnalysisRequest.t
+        ; proc_uid: string
+        ; proc_name: Sqlite3.Data.t
+        ; merge_pulse_payload: old_pulse_payload:Sqlite3.Data.t option -> Sqlite3.Data.t list
+        ; merge_report_summary: old_report_summary:Sqlite3.Data.t option -> Sqlite3.Data.t
+        ; merge_summary_metadata: old_summary_metadata:Sqlite3.Data.t option -> Sqlite3.Data.t }
     | Terminate
+    | UpdateReportSummary of
+        { proc_uid: string
+        ; merge_report_summary: old_report_summary:Sqlite3.Data.t option -> Sqlite3.Data.t }
 
   let to_string = function
     | AddSourceFile _ ->
@@ -399,6 +582,8 @@ module Command = struct
         "StoreSpec"
     | Terminate ->
         "Terminate"
+    | UpdateReportSummary _ ->
+        "UpdateReportSummary"
 
 
   let[@warning "-unused-value-declaration"] pp fmt cmd = F.pp_print_string fmt (to_string cmd)
@@ -424,41 +609,50 @@ module Command = struct
         Implementation.merge_captures ~root ~infer_deps_file
     | MergeSummaries {infer_outs} ->
         Implementation.merge_summaries infer_outs
+    | ReplaceAttributes {proc_uid; proc_attributes; cfg; callees; analysis} ->
+        Implementation.replace_attributes ~proc_uid ~proc_attributes ~cfg ~callees ~analysis
     | ShrinkAnalysisDB ->
         Implementation.shrink_analysis_db ()
     | StoreIssueLog {checker; source_file; issue_log} ->
         Implementation.store_issue_log ~checker ~source_file ~issue_log
-    | StoreSpec {proc_uid; proc_name; payloads; report_summary; summary_metadata} ->
-        Implementation.store_spec ~proc_uid ~proc_name ~payloads ~report_summary ~summary_metadata
-    | ReplaceAttributes {proc_uid; proc_attributes; cfg; callees; analysis} ->
-        Implementation.replace_attributes ~proc_uid ~proc_attributes ~cfg ~callees ~analysis
+    | StoreSpec
+        { analysis_req
+        ; proc_uid
+        ; proc_name
+        ; merge_pulse_payload
+        ; merge_report_summary
+        ; merge_summary_metadata } ->
+        Implementation.store_spec analysis_req ~proc_uid ~proc_name ~merge_pulse_payload
+          ~merge_report_summary ~merge_summary_metadata
     | Terminate ->
         Implementation.terminate ()
+    | UpdateReportSummary {proc_uid; merge_report_summary} ->
+        Implementation.update_report_summary ~proc_uid ~merge_report_summary
 end
 
 type response = Ack | Error of (exn * Caml.Printexc.raw_backtrace)
+
+let server_pid : Pid.t option ref = ref None
 
 module Server = struct
   (* General comment about socket/channel destruction: closing the in_channel associated with the socket
      will close the file descriptor too, so closing also the out_channel sometimes throws an exception.
      That's why in all code below only the input channel is ever closed. *)
 
-  let socket_name = "sqlite_write_socket"
+  let log_store_pct useful_time =
+    let label = "dbwriter.store_sql_pct" in
+    let total_useful = ExecutionDuration.total_useful_s useful_time in
+    let total_store = ExecutionDuration.total_useful_s !Implementation.store_sql_time in
+    let store_pct = 100.0 *. total_store /. total_useful |> Float.round |> int_of_float in
+    L.debug Analysis Quiet "%s= %d%%@\n" label store_pct ;
+    ScubaLogging.log_count ~label ~value:store_pct
 
-  let socket_addr = Unix.ADDR_UNIX socket_name
 
-  let socket_domain = Unix.domain_of_sockaddr socket_addr
-
-  (** Unix socket *paths* have a historical length limit of ~100 chars (!?*\@&*$). However, this
-      only applies to the argument passed in the system call to create the socket, not to the actual
-      path. Thus a workaround is to cd into the parent dir of the socket and then use it, hence this
-      function. *)
-  let in_results_dir ~f = Utils.do_in_dir ~dir:Config.toplevel_results_dir ~f
-
-  let rec server_loop socket =
+  let rec server_loop ?(useful_time = ExecutionDuration.zero) socket =
     let client_sock, _client = Unix.accept socket in
     let in_channel = Unix.in_channel_of_descr client_sock
     and out_channel = Unix.out_channel_of_descr client_sock in
+    let now = ExecutionDuration.counter () in
     let command : Command.t = Marshal.from_channel in_channel in
     ( try
         Command.execute command ;
@@ -467,58 +661,34 @@ module Server = struct
         Marshal.to_channel out_channel (Error (exn, Caml.Printexc.get_raw_backtrace ())) [] ) ;
     Out_channel.flush out_channel ;
     In_channel.close in_channel ;
+    let useful_time = ExecutionDuration.add_duration_since useful_time now in
     match command with
     | Terminate ->
         L.debug Analysis Quiet "Sqlite write daemon: terminating@." ;
+        ExecutionDuration.log ~prefix:"dbwriter.useful_time" Analysis useful_time ;
+        ExecutionDuration.log ~prefix:"dbwriter.store_sql" Analysis !Implementation.store_sql_time ;
+        log_store_pct useful_time ;
         ()
     | _ ->
-        server_loop socket
-
-
-  let socket_exists () = in_results_dir ~f:(fun () -> Sys.file_exists_exn socket_name)
-
-  (* Error recuperation is done by attempting this function at module initialization time, and
-     not using DbWriter at all in case it fails. See {!can_use_socket} below. *)
-  let setup_socket () =
-    if socket_exists () then L.die InternalError "Sqlite write daemon: socket already exists@." ;
-    let socket = Unix.socket ~domain:socket_domain ~kind:SOCK_STREAM ~protocol:0 () in
-    in_results_dir ~f:(fun () -> Unix.bind socket ~addr:socket_addr) ;
-    (* [backlog] is (supposedly) the length of the queue for pending connections ;
-       there are no rules about the implied behaviour though.  Here use optimistically
-       the number of workers, though even that is a guess. *)
-    Unix.listen socket ~backlog:Config.jobs ;
-    socket
-
-
-  let remove_socket_file () =
-    in_results_dir ~f:(fun () -> if socket_exists () then Unix.unlink socket_name)
-
-
-  let remove_socket socket =
-    in_results_dir ~f:(fun () -> Unix.close socket) ;
-    remove_socket_file ()
-
-
-  (* Check whether we can create a socket to communicate with the asynchronous DBWriter process. *)
-  let can_use_socket () =
-    try
-      (* This function is called very early, and the infer-out directory may not have been created
-         yet. Ensure it exists before attempting to create the socket. *)
-      Unix.mkdir_p Config.toplevel_results_dir ;
-      let socket = setup_socket () in
-      remove_socket socket ;
-      true
-    with _ -> false
+        server_loop ~useful_time socket
 
 
   let server socket =
-    let finally () = remove_socket socket in
-    Exception.try_finally ~f:(fun () -> server_loop socket) ~finally
+    L.debug Analysis Quiet "Sqlite write daemon: process starting, pid= %a@." Pid.pp
+      (Unix.getpid ()) ;
+    let finally () = ServerSocket.remove_socket socket in
+    Exception.try_finally ~finally ~f:(fun () ->
+        let ExecutionDuration.{execution_duration} =
+          ExecutionDuration.timed_evaluate ~f:(fun () -> server_loop socket)
+        in
+        ExecutionDuration.log ~prefix:"dbwriter.total_time" Analysis execution_duration )
 
 
   let send cmd =
-    let in_channel, out_channel = in_results_dir ~f:(fun () -> Unix.open_connection socket_addr) in
-    Marshal.to_channel out_channel cmd [] ;
+    let in_channel, out_channel =
+      ServerSocket.in_results_dir ~f:(fun () -> Unix.open_connection ServerSocket.socket_addr)
+    in
+    Marshal.to_channel out_channel cmd [Closures] ;
     Out_channel.flush out_channel ;
     let (response : response) = Marshal.from_channel in_channel in
     ( match response with
@@ -531,45 +701,18 @@ module Server = struct
 
   let start () =
     L.debug Analysis Quiet "Sqlite write daemon: starting up@." ;
-    let socket = setup_socket () in
+    let socket = ServerSocket.setup_socket () in
     L.debug Analysis Quiet "Sqlite write daemon: set up complete, waiting for connections@." ;
     match Unix.fork () with
     | `In_the_child ->
         ForkUtils.protect ~f:server socket ;
         L.exit 0
-    | `In_the_parent _child_pid ->
+    | `In_the_parent child_pid ->
+        server_pid := Some child_pid ;
         send Command.Handshake
 end
 
-let remove_socket_file () = Server.remove_socket_file ()
-
-let default_use_daemon =
-  lazy
-    (let is_windows =
-       match Version.build_platform with Windows -> true | Linux | Darwin -> false
-     in
-     Config.((not is_windows) && dbwriter && (not (buck || genrule_mode)) && jobs > 1)
-     &&
-     (* Only the main process should try detecting whether the socket can be created.
-        Otherwise, re-spawned Infer will try to create a socket on top of the existing one. *)
-     if Config.is_originator then (
-       let socket_ok = Server.can_use_socket () in
-       if not socket_ok then
-         L.user_warning
-           "Cannot setup the socket to communicate with the database daemon. Performance will be \
-            impacted. Do you have enough rights to create a Unix socket in directory '%s'?@."
-           Config.toplevel_results_dir ;
-       socket_ok )
-     else Server.socket_exists () )
-
-
-let override_daemon_ref = ref None
-
-let override_use_daemon should_use = override_daemon_ref := Some should_use
-
-let use_daemon () =
-  Option.value_or_thunk !override_daemon_ref ~default:(fun () -> Lazy.force default_use_daemon)
-
+let remove_socket_file () = ServerSocket.remove_socket_file ()
 
 let perform cmd = if use_daemon () then Server.send cmd else Command.execute cmd
 
@@ -599,7 +742,19 @@ let replace_attributes ~proc_uid ~proc_attributes ~cfg ~callees ~analysis =
 
 let shrink_analysis_db () = perform ShrinkAnalysisDB
 
-let stop () = try Server.send Command.Terminate with Unix.Unix_error _ -> ()
+let stop () =
+  (try Server.send Command.Terminate with Unix.Unix_error _ -> ()) ;
+  (* don't terminate the main infer process before the server has finished *)
+  Option.iter !server_pid ~f:(fun server_pid ->
+      L.debug Analysis Quiet "Sqlite write daemon: waiting for process %a to finish@." Pid.pp
+        server_pid ;
+      let pid, exit_or_signal = Unix.wait (`Pid server_pid) in
+      Result.iter_error exit_or_signal ~f:(function error ->
+          ( L.internal_error "ERROR: Sqlite write daemon terminated with an error: %s@\n"
+              (Core_unix.Exit_or_signal.to_string_hum (Error error)) ;
+            try ServerSocket.remove_socket_file () with Unix.Unix_error _ -> () ) ) ;
+      L.debug Analysis Quiet "Sqlite write daemon: process %a terminated@." Pid.pp pid )
+
 
 let start =
   let already_started = ref false in
@@ -616,5 +771,22 @@ let store_issue_log ~checker ~source_file ~issue_log =
   perform (StoreIssueLog {checker; source_file; issue_log})
 
 
-let store_spec ~proc_uid ~proc_name ~payloads ~report_summary ~summary_metadata =
-  perform (StoreSpec {proc_uid; proc_name; payloads; report_summary; summary_metadata})
+let update_report_summary ~proc_uid ~merge_report_summary =
+  perform (UpdateReportSummary {proc_uid; merge_report_summary})
+
+
+let store_spec analysis_req ~proc_uid ~proc_name ~merge_pulse_payload ~merge_report_summary
+    ~merge_summary_metadata =
+  let counter = ExecutionDuration.counter () in
+  let result =
+    perform
+      (StoreSpec
+         { analysis_req
+         ; proc_uid
+         ; proc_name
+         ; merge_pulse_payload
+         ; merge_report_summary
+         ; merge_summary_metadata } )
+  in
+  Stats.incr_spec_store_times counter ;
+  result

@@ -9,27 +9,39 @@ open! IStd
 module F = Format
 module L = Logging
 open PulseBasicInterface
-module BaseAddressAttributes = PulseBaseAddressAttributes
 module BaseDomain = PulseBaseDomain
 module Memory = PulseBaseMemory
 open IOption.Let_syntax
 
 type value = AbstractValue.t [@@deriving compare, equal]
 
+type static_type = Typ.t [@@deriving compare, equal]
+
+type value_and_type = value * static_type [@@deriving compare, equal]
+
 type event =
   | ArrayWrite of {aw_array: value; aw_index: value}
-  | Call of {return: value option; arguments: value list; procname: Procname.t}
+  | Call of {return: value_and_type option; arguments: value_and_type list; procname: Procname.t}
 [@@deriving compare, equal]
 
 let pp_comma_seq f xs = Pp.comma_seq ~print_env:Pp.text_break f xs
+
+let pp_value = AbstractValue.pp
+
+(* When printing types below, use only this function, to make sure it's done always in the same way. *)
+let pp_type f type_ = F.fprintf f "%s" (Typ.to_string type_)
+
+(* When printing Procname.t below for matching purposes, use only this function. *)
+let pp_procname f procname = Procname.pp_fullname_only f procname
+
+let pp_value_and_type f (value, type_) = F.fprintf f "@[%a:@ %a@]" pp_value value pp_type type_
 
 let pp_event f = function
   | ArrayWrite {aw_array; aw_index} ->
       F.fprintf f "@[ArrayWrite %a[%a]@]" AbstractValue.pp aw_array AbstractValue.pp aw_index
   | Call {return; arguments; procname} ->
-      let procname = Procname.hashable_name procname (* as in [static_match] *) in
-      F.fprintf f "@[call@ %a=%s(%a)@]" (Pp.option AbstractValue.pp) return procname
-        (pp_comma_seq AbstractValue.pp) arguments
+      F.fprintf f "@[call@ %a=%a(%a)@]" (Pp.option pp_value_and_type) return pp_procname procname
+        (pp_comma_seq pp_value_and_type) arguments
 
 
 type vertex = ToplAutomaton.vindex [@@deriving compare, equal]
@@ -67,8 +79,6 @@ type pulse_state =
   ; pulse_pre: BaseDomain.t
   ; path_condition: Formula.t
   ; get_reachable: unit -> AbstractValue.Set.t }
-
-let get_dynamic_type {pulse_post} = BaseAddressAttributes.get_dynamic_type pulse_post.attrs
 
 module Constraint : sig
   type predicate
@@ -196,9 +206,6 @@ end = struct
 
   let substitute = sub_list substitute_predicate
 
-  (* TODO: Replace with a proper type environment. *)
-  let default_tenv = Tenv.create ()
-
   let pp_operator f operator =
     match operator with
     | Builtin op ->
@@ -233,7 +240,7 @@ end = struct
        considerations apply to other predicates, such as LeadsTo.
 
        The iteration order is unspecified in the sense that it's dangerous for callers of this
-       function to rely on it. But, we will look at predicates in an order convenient for
+       function to rely on it. But, we will look at predicates in some fixed order, convenient for
        implementation.
 
        (Terminology for below:
@@ -242,24 +249,24 @@ end = struct
           "path predicate" = value of shape Constraint.Builtin (_, _, _)
           "heap predicate" = value of shape Constraint.LeadsTo (_,_) or Constraint.NotLeadsTo (_,_)
           "path condition" = (possibly modified) pulse_state.path_condition (of type Formula.t)
-          "heap" = (possibly modified) pulse_state.post_?.heap (of type Memory.t)
+          "heap" = (possibly modified) pulse_state.pulse_post.heap (of type Memory.t)
           "new_eqs" = value of type Formula.new_eqs
        end of terminology aside.)
 
        Whenever we process a predicate, we first re-write it according to `Formula.get_var_repr`
        applied to the current path condition.
 
-       First, we iterate through path predicates *except* disequalities. If the predicate is implied
-       by the path condition, we drop it. Otherwise, we conjoin it to the path condition (and detect
-       if it leads to unsatisfiability), and accumulate new_eqs.
-
-       Next, we normalize the path condition, accumulating more new_eqs. And we incorporate new_eqs
-       into the heap (that is, substitute in the heap). From this point on we don't need new_eqs.
-
-       Next, we iterate through disequality path predicates. If the predicate is implied by the path
-       condition *or* by the heap, we drop it. Otherwise, we conjoin it to the path condition (and
-       detect if it leads to unsatisfiability). We assert that no new_eqs are produced (which is
-       what Formula.and_normalized_atom currently does).
+       First, we iterate through path predicates. If the predicate is implied by the path condition
+       or by the heap, we drop it. Otherwise we conjoin it to the path condition and we normalize
+       the path condition. Both conjoining and normalization may render the path condition
+       unsatisfiable; if they do not then they may generate new deduced equalities. If the predicate
+       was an equality, we also add it to new equalities, before updating the heap according.
+       When we apply new equalities as substitutions to the heap, we have one more opportunity to
+       detect unsatisfiability. After these updates to the path condition and the heap, we are ready
+       to process the next predicate. (The invariant we try to maintain here is that the path
+       condition and the heap reflect all the information in the predicates that have been
+       processed. This may be expensive but: (a) we do not apply this algorithm often; and (b) Topl
+       tends to track few predicates.)
 
        Next, we iterate through LeadsTo predicates. If they are implied by the heap, we drop them;
        otherwise, we keep them and we add them to the heap. (For implementation, we do not actually
@@ -272,12 +279,11 @@ end = struct
       type binary = (Formula.operand * Formula.operand) list
 
       type t =
-        { no_neq_constr: (Binop.t * Formula.operand * Formula.operand) list
-        ; neq_constr: binary
+        { path_constr: (Binop.t * Formula.operand * Formula.operand) list
         ; leadsto_constr: binary
         ; notleadsto_constr: binary }
 
-      let empty = {no_neq_constr= []; neq_constr= []; leadsto_constr= []; notleadsto_constr= []}
+      let empty = {path_constr= []; leadsto_constr= []; notleadsto_constr= []}
     end in
     let module C = ConstraintByType in
     let open SatUnsat.Import in
@@ -285,10 +291,8 @@ end = struct
       let* in_constr =
         let f in_constr predicate =
           match predicate with
-          | Binary (Builtin Ne, l, r) ->
-              Sat C.{in_constr with neq_constr= (l, r) :: in_constr.neq_constr}
           | Binary (Builtin op, l, r) ->
-              Sat C.{in_constr with no_neq_constr= (op, l, r) :: in_constr.no_neq_constr}
+              Sat C.{in_constr with path_constr= (op, l, r) :: in_constr.path_constr}
           | Binary (LeadsTo, l, r) ->
               Sat C.{in_constr with leadsto_constr= (l, r) :: in_constr.leadsto_constr}
           | Binary (NotLeadsTo, l, r) ->
@@ -308,75 +312,70 @@ end = struct
         | other ->
             other
       in
-      (* Handle path predicates, except disequalities. *)
-      let* path_condition, new_eqs, out_constr =
-        let f (path_condition, old_new_eqs, out_constr) (op, l, r) =
+      (* Handle path predicates. *)
+      let* _path_condition, heap, out_constr =
+        let f (path_condition, heap, out_constr) ((op : Binop.t), l, r) =
           let l, r = (rep path_condition l, rep path_condition r) in
-          match Formula.prune_binop ~negated:true op l r path_condition with
-          | Sat _ ->
-              let+ path_condition, new_eqs =
-                Formula.prune_binop ~negated:false op l r path_condition
-              in
-              ( path_condition
-              , RevList.append old_new_eqs new_eqs
-              , C.{out_constr with no_neq_constr= (op, l, r) :: out_constr.no_neq_constr} )
-          | Unsat ->
-              Sat (path_condition, old_new_eqs, out_constr)
-        in
-        SatUnsat.list_fold in_constr.C.no_neq_constr ~f
-          ~init:(pulse_state.path_condition, RevList.empty, out_constr)
-      in
-      (* Normalize path condition, and update heap *)
-      let* path_condition, heap =
-        let get_dynamic_type = get_dynamic_type pulse_state in
-        let old_new_eqs = new_eqs in
-        let* path_condition, new_eqs =
-          Formula.normalize default_tenv ~get_dynamic_type path_condition
-        in
-        let new_eqs = RevList.to_list (RevList.append old_new_eqs new_eqs) in
-        let+ heap =
-          let incorporate_eq heap (eq : Formula.new_eq) =
-            match eq with
-            | Equal (v1, v2) ->
-                Memory.subst_var ~for_summary:true (v1, v2) heap
-            | EqZero _ ->
-                (* TODO: Detect more contradictions here. *)
-                Sat heap
+          let is_implied_by_pathcondition () =
+            Formula.prune_binop ~negated:true op l r path_condition
+            |> SatUnsat.sat |> Option.is_none
           in
-          SatUnsat.list_fold new_eqs ~init:pulse_state.pulse_post.heap ~f:incorporate_eq
-        in
-        (path_condition, heap)
-      in
-      (* Handle disequalities. *)
-      let* _path_condition =
-        let f path_condition (l, r) =
-          let l, r = (rep path_condition l, rep path_condition r) in
-          if Formula.equal_operand l r then Unsat
+          let is_implied_by_heap () =
+            match (op, l, r) with
+            | Ne, AbstractValueOperand l, AbstractValueOperand r ->
+                Memory.is_allocated heap l && Memory.is_allocated heap r
+            | Ne, AbstractValueOperand v, ConstOperand (Cint z)
+            | Ne, ConstOperand (Cint z), AbstractValueOperand v ->
+                IntLit.iszero z && Memory.is_allocated heap v
+            | _ ->
+                false
+          in
+          let is_trivial_unsat () =
+            match op with Ne | Gt | Lt -> Formula.equal_operand l r | _ -> false
+          in
+          let is_trivial_valid () =
+            match op with Eq | Ge | Le -> Formula.equal_operand l r | _ -> false
+          in
+          if is_trivial_unsat () then Unsat
+          else if is_trivial_valid () || is_implied_by_heap () || is_implied_by_pathcondition ()
+          then (* drop (op.l.r) *) Sat (path_condition, heap, out_constr)
           else
-            let implied_by_pathcondition () =
-              Formula.prune_binop ~negated:true Ne l r path_condition
-              |> SatUnsat.sat |> Option.is_none
+            let* path_condition, new_eqs_a =
+              Formula.prune_binop ~negated:false op l r path_condition
             in
-            let implied_by_heap () =
-              match (l, r) with
-              | AbstractValueOperand l, AbstractValueOperand r ->
-                  Memory.is_allocated heap l && Memory.is_allocated heap r
-              | AbstractValueOperand v, ConstOperand (Cint z)
-              | ConstOperand (Cint z), AbstractValueOperand v ->
-                  IntLit.iszero z && Memory.is_allocated heap v
-              | _ ->
-                  false
-            in
-            if implied_by_heap () || implied_by_pathcondition () then Sat path_condition
-            else
-              let+ path_condition, new_eqs =
-                Formula.prune_binop ~negated:false Ne l r path_condition
+            let new_eqs =
+              let new_eqs = RevList.empty in
+              let new_eqs =
+                match (op, l, r) with
+                | Eq, AbstractValueOperand lv, AbstractValueOperand rv ->
+                    RevList.cons (Formula.Equal (lv, rv)) new_eqs
+                | Eq, ConstOperand (Cint z), AbstractValueOperand v
+                | Eq, AbstractValueOperand v, ConstOperand (Cint z)
+                  when IntLit.iszero z ->
+                    RevList.cons (Formula.EqZero v) new_eqs
+                | _ ->
+                    new_eqs
               in
-              if not (RevList.is_empty new_eqs) then
-                L.die InternalError "Oh, no: I expected disequalities to not introduce equalities" ;
-              path_condition
+              let ( ++ ) = RevList.append in
+              new_eqs ++ new_eqs_a
+            in
+            let* heap =
+              let incorporate_eq heap (eq : Formula.new_eq) =
+                match eq with
+                | Equal (v1, v2) ->
+                    Memory.subst_var ~for_summary:true (v1, v2) heap
+                | EqZero v ->
+                    if Memory.is_allocated heap v then Unsat else Sat heap
+              in
+              SatUnsat.list_fold (RevList.to_list new_eqs) ~init:heap ~f:incorporate_eq
+            in
+            Sat
+              ( path_condition
+              , heap
+              , C.{out_constr with path_constr= (op, l, r) :: out_constr.path_constr} )
         in
-        SatUnsat.list_fold in_constr.C.neq_constr ~init:path_condition ~f
+        SatUnsat.list_fold in_constr.C.path_constr ~f
+          ~init:(pulse_state.path_condition, pulse_state.pulse_post.heap, out_constr)
       in
       (* Digresion: heap (and fake-heap) traversal. *)
       let leadsto fake_heap heap source target =
@@ -445,8 +444,7 @@ end = struct
     in
     match go () with
     | Sat out_constr ->
-        List.map out_constr.neq_constr ~f:(function l, r -> Binary (Builtin Ne, l, r))
-        @ List.map out_constr.no_neq_constr ~f:(function op, l, r -> Binary (Builtin op, l, r))
+        List.map out_constr.path_constr ~f:(function op, l, r -> Binary (Builtin op, l, r))
         @ List.map out_constr.leadsto_constr ~f:(function l, r -> Binary (LeadsTo, l, r))
         @ List.map out_constr.notleadsto_constr ~f:(function l, r -> Binary (NotLeadsTo, l, r))
     | Unsat ->
@@ -558,7 +556,7 @@ let deref_field_access pulse_state value class_name field_name : Formula.operand
   let* v1, _hist = Memory.Edges.find_opt (FieldAccess field) edges in
   let* edges = Memory.find_opt v1 heap in
   let* v2, _hist = Memory.Edges.find_opt Dereference edges in
-  match BaseAddressAttributes.get_const_string v2 pulse_state.pulse_post.attrs with
+  match Formula.as_constant_string pulse_state.path_condition v2 with
   | Some r ->
       Some (Formula.ConstOperand (Const.Cstr r))
   | _ ->
@@ -651,17 +649,50 @@ let static_match_array_write arr index label : tcontext option =
       None
 
 
-let static_match_call return arguments procname label : tcontext option =
-  let rev_arguments = List.rev arguments in
-  let procname = Procname.hashable_name procname in
+let typ_void = Typ.{desc= Tvoid; quals= mk_type_quals ()}
+
+let static_match_call tenv return arguments procname label : tcontext option =
+  let is_match re text = Option.for_all re ~f:(fun re -> Str.string_match re.ToplAst.re text 0) in
+  let is_match_type_base re typ = is_match re (Fmt.to_to_string pp_type typ) in
+  let is_match_type_name mk_typ re name _struct = is_match_type_base re (mk_typ name) in
+  (* NOTE: If B has supertype A, and we get type B**, then regex is matched against A** and B**.
+     In other words, [Tptr] and [Tarray] are treated as covariant. *)
+  let rec is_match_type (map : Typ.t -> Typ.t) re (typ : Typ.t) =
+    match typ with
+    | {desc= Tptr (typ, kind); quals} ->
+        is_match_type (fun t -> map {Typ.desc= Tptr (t, kind); quals}) re typ
+    | {desc= Tarray arr; quals} ->
+        is_match_type (fun t -> map {Typ.desc= Tarray {arr with elt= t}; quals}) re arr.elt
+    | {desc= Tstruct name; quals} ->
+        Tenv.mem_supers tenv name
+          ~f:(is_match_type_name (fun n -> map {Typ.desc= Tstruct n; quals}) re)
+    | _ ->
+        is_match_type_base re (map typ)
+  in
   let match_name () : bool =
     match label.ToplAst.pattern with
-    | ProcedureNamePattern pname ->
-        Str.string_match (Str.regexp pname) procname 0
+    | CallPattern {procedure_name_regex; type_regexes} -> (
+        is_match (Some procedure_name_regex) (Fmt.to_to_string pp_procname procname)
+        &&
+        match type_regexes with
+        | None ->
+            true
+        | Some regexes -> (
+            let types =
+              let argument_types = List.map ~f:snd arguments in
+              let return_type = Option.value_map ~default:typ_void ~f:snd return in
+              argument_types @ [return_type]
+            in
+            match List.for_all2 regexes types ~f:(is_match_type Fn.id) with
+            | Ok ok ->
+                ok
+            | Unequal_lengths ->
+                false ) )
     | _ ->
         false
   in
   let match_args () : tcontext option =
+    let rev_arguments = List.rev_map ~f:fst arguments in
     let match_formals formals : tcontext option =
       let bind ~init rev_formals =
         let f tcontext variable value = (variable, value) :: tcontext in
@@ -671,7 +702,7 @@ let static_match_call return arguments procname label : tcontext option =
         | Unequal_lengths ->
             None
       in
-      match (List.rev formals, return) with
+      match (List.rev formals, Option.map ~f:fst return) with
       | [], Some _ ->
           None
       | rev_formals, None ->
@@ -720,17 +751,17 @@ end
 (** Returns a list of transitions whose pattern matches (e.g., event type matches). Each match
     produces a tcontext (transition context), which matches transition-local variables to abstract
     values. *)
-let static_match event : (ToplAutomaton.transition * tcontext) list =
+let static_match tenv event : (ToplAutomaton.transition * tcontext) list =
   let match_one index transition =
     let f label =
       match event with
       | ArrayWrite {aw_array; aw_index} ->
           static_match_array_write aw_array aw_index label
       | Call {return; arguments; procname} ->
-          static_match_call return arguments procname label
+          static_match_call tenv return arguments procname label
     in
     let tcontext_opt = Option.value_map ~default:(Some []) ~f transition.ToplAutomaton.label in
-    L.d_printfln "@[<2>PulseTopl.static_match:@;transition %a@;event %a@;result %a@]"
+    L.d_printfln_escaped "@[<2>PulseTopl.static_match:@;transition %a@;event %a@;result %a@]"
       (ToplAutomaton.pp_transition (Topl.automaton ()))
       transition pp_event event (Pp.option pp_tcontext) tcontext_opt ;
     Option.map
@@ -853,8 +884,8 @@ let apply_limits pulse_state state =
   state |> maybe needs_shrinking expensive_simplification |> maybe needs_shrinking drop_disjuncts
 
 
-let small_step loc pulse_state event simple_states =
-  let tmatches = static_match event in
+let small_step tenv loc pulse_state event simple_states =
+  let tmatches = static_match tenv event in
   let evolve_transition (old : simple_state) (transition, tcontext) : state =
     let mk ?(memory = old.post.memory) ?(pruned = Constraint.true_) significant =
       let last_step =
@@ -975,7 +1006,7 @@ let filter_for_summary pulse_state state = drop_infeasible pulse_state state
 let description_of_step_data step_data =
   ( match step_data with
   | SmallStep (Call {procname}) | LargeStep {procname} ->
-      F.fprintf F.str_formatter "@[call to %a@]" Procname.pp procname
+      F.fprintf F.str_formatter "@[call to %a@]" Procname.pp_verbose procname
   | SmallStep (ArrayWrite _) ->
       F.fprintf F.str_formatter "@[write to array@]" ) ;
   F.flush_str_formatter ()
@@ -1070,8 +1101,8 @@ let report_errors proc_desc err_log ~pulse_is_manifest state =
 
 (* {1 Fast path} *)
 
-let small_step location pulse_state event state =
-  match state with [] -> state | _ -> small_step location pulse_state event state
+let small_step tenv location pulse_state event state =
+  match state with [] -> state | _ -> small_step tenv location pulse_state event state
 
 
 let large_step ~call_location ~callee_proc_name ~substitution pulse_state ~callee_summary

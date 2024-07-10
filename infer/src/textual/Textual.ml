@@ -125,20 +125,30 @@ let builtin_allocate_array = "__sil_allocate_array"
 
 let builtin_lazy_class_initialize = "__sil_lazy_class_initialize"
 
-let builtin_get_lazy_class = "__sil_get_lazy_class"
+let builtin_generics_constructor = "__sil_generics"
 
 let builtin_cast = "__sil_cast"
+
+let builtin_get_lazy_class = "__sil_get_lazy_class"
 
 let builtin_instanceof = "__sil_instanceof"
 
 module TypeName : sig
   include NAME
 
+  val hack_builtin : t
+
+  val hack_generics : t
+
   val wildcard : t
 end = struct
   include Name
 
   let wildcard = {value= "?"; loc= Location.Unknown}
+
+  let hack_builtin = {value= "$builtins"; loc= Location.Unknown}
+
+  let hack_generics = {value= "HackGenerics"; loc= Location.Unknown}
 end
 
 module QualifiedProcName = struct
@@ -182,7 +192,15 @@ let pp_qualified_fieldname fmt ({enclosing_class; name} : qualified_fieldname) =
   F.fprintf fmt "%a%a" TypeName.pp enclosing_class FieldName.pp name
 
 
-module VarName : NAME = Name
+module VarName : sig
+  include NAME
+
+  val is_hack_reified_generics_param : t -> bool
+end = struct
+  include Name
+
+  let is_hack_reified_generics_param {value} = String.equal value "$0ReifiedGenerics"
+end
 
 module NodeName : NAME = Name
 
@@ -207,11 +225,21 @@ module Attr = struct
 
   let is_async {name; values} = String.equal name "async" && List.is_empty values
 
+  let is_hack_wrapper {name; values} = String.equal name "wrapper" && List.is_empty values
+
+  let is_abstract {name; values} = String.equal name "abstract" && List.is_empty values
+
+  let is_alias {name; values} =
+    String.equal name "kind" && List.equal String.equal values ["typedef"]
+
+
   let is_const {name; values} = String.equal name "constant" && List.is_empty values
 
   let is_curry {name; values} = String.equal name "curry" && List.is_empty values
 
   let is_final {name; values} = String.equal name "final" && List.is_empty values
+
+  let is_notnull {name; values} = String.equal name "notnull" && List.is_empty values
 
   let is_interface {name; values} =
     String.equal name "kind" && List.equal String.equal values ["interface"]
@@ -339,15 +367,21 @@ module ProcSig = struct
         qualified_name
 
 
-  let incr_arity procsig =
+  let arity = function Hack {arity} | Python {arity} -> arity | Other _ -> None
+
+  let map_arity procsig ~f =
     match procsig with
     | Hack {qualified_name; arity= Some arity} ->
-        Hack {qualified_name; arity= Some (arity + 1)}
+        Hack {qualified_name; arity= Some (f arity)}
     | Python {qualified_name; arity= Some arity} ->
-        Python {qualified_name; arity= Some (arity + 1)}
+        Python {qualified_name; arity= Some (f arity)}
     | Hack {arity= None} | Python {arity= None} | Other _ ->
         procsig
 
+
+  let incr_arity procsig = map_arity procsig ~f:(( + ) 1)
+
+  let decr_arity procsig n = map_arity procsig ~f:(fun arity -> arity - n)
 
   let is_hack_init = function
     | Hack {qualified_name} ->
@@ -400,6 +434,11 @@ module ProcDecl = struct
     {enclosing_class= TopLevel; name}
 
 
+  let make_builtin_name string loc : QualifiedProcName.t =
+    let name : ProcName.t = {value= string; loc} in
+    {enclosing_class= Enclosing TypeName.hack_builtin; name}
+
+
   let allocate_object_name = make_toplevel_name builtin_allocate Location.Unknown
 
   let allocate_array_name = make_toplevel_name builtin_allocate_array Location.Unknown
@@ -409,6 +448,8 @@ module ProcDecl = struct
   let get_lazy_class_name = make_toplevel_name builtin_get_lazy_class Location.Unknown
 
   let cast_name = make_toplevel_name builtin_cast Location.Unknown
+
+  let generics_constructor = make_builtin_name builtin_generics_constructor Location.Unknown
 
   let instanceof_name = make_toplevel_name builtin_instanceof Location.Unknown
 
@@ -528,6 +569,8 @@ module ProcDecl = struct
   let is_get_lazy_class_builtin qualified_name =
     QualifiedProcName.equal get_lazy_class_name qualified_name
 
+
+  let is_generics_constructor_builtin = QualifiedProcName.equal generics_constructor
 
   let is_cast_builtin = QualifiedProcName.equal cast_name
 

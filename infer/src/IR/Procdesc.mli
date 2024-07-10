@@ -19,7 +19,7 @@ end
 (** node of the control flow graph *)
 module Node : sig
   (** type of nodes *)
-  type t [@@deriving compare]
+  type t [@@deriving compare, hash]
 
   (** node id *)
   type id = private int [@@deriving compare, equal, hash]
@@ -122,6 +122,9 @@ module Node : sig
   val append_instrs : t -> Sil.instr list -> unit
   (** Append the instructions to the list of instructions to execute *)
 
+  val prepend_instrs : t -> Sil.instr list -> unit
+  (** Prepend the instructions to the list of instructions to execute *)
+
   val d_instrs : highlight:Sil.instr option -> t -> unit
   (** Dump instructions for the node, highlighting the given subinstruction if present *)
 
@@ -179,9 +182,6 @@ module Node : sig
   val is_dangling : t -> bool
   (** Returns true if the node is dangling, i.e. no successors and predecessors *)
 
-  val hash : t -> int
-  (** Hash function for nodes *)
-
   val pp : Format.formatter -> t -> unit
   (** Pretty print the node *)
 
@@ -191,7 +191,7 @@ module Node : sig
   val pp_stmt : Format.formatter -> stmt_nodekind -> unit
 
   val pp_with_instrs : ?print_types:bool -> Format.formatter -> t -> unit
-    [@@warning "-unused-value-declaration"]
+  [@@warning "-unused-value-declaration"]
   (** Pretty print the node with instructions *)
 
   val compute_key : t -> NodeKey.t
@@ -202,6 +202,9 @@ module IdMap : PrettyPrintable.PPMap with type key = Node.id
 
 (** Hash table with nodes as keys. *)
 module NodeHash : Caml.Hashtbl.S with type key = Node.t
+
+(** Hash set with nodes as keys. *)
+module NodeHashSet : HashSet.S with type elt = Node.t
 
 (** Map over nodes. *)
 module NodeMap : Caml.Map.S with type key = Node.t
@@ -227,6 +230,9 @@ val create_node : t -> Location.t -> Node.nodekind -> Sil.instr list -> Node.t
 val create_node_from_not_reversed :
   t -> Location.t -> Node.nodekind -> Instrs.not_reversed_t -> Node.t
 
+val remove_node : t -> Node.t -> unit
+(** Remove a node from a cfg *)
+
 val fold_instrs : t -> init:'accum -> f:('accum -> Node.t -> Sil.instr -> 'accum) -> 'accum
 (** fold over all nodes and their instructions *)
 
@@ -236,6 +242,7 @@ val from_proc_attributes : ProcAttributes.t -> t
 (** Use [Cfg.create_proc_desc] if you are adding a proc desc to a cfg *)
 
 val get_access : t -> ProcAttributes.access
+[@@warning "-unused-value-declaration"]
 (** Return the visibility attribute *)
 
 val get_attributes : t -> ProcAttributes.t
@@ -275,6 +282,10 @@ val get_locals : t -> ProcAttributes.var_data list
 val is_local : t -> Pvar.t -> bool
 (** [is_local pdesc pvar] is [true] iff [pvar] is a local variable of [pdesc]. This function
     performs a linear search on the local variables of [pdesc]. *)
+
+val is_non_structured_binding_local_or_formal : t -> Pvar.t -> bool
+(** Similar to [is_local], but returns [true] when [pvar] is a non-structured-binding local variable
+    or a formal variable of [pdesc]. *)
 
 val get_nodes : t -> Node.t list
 (** Return the nodes, excluding the start node and the exit node. *)
@@ -334,9 +345,6 @@ val iter_nodes : (Node.t -> unit) -> t -> unit
 val fold_nodes : t -> init:'accum -> f:('accum -> Node.t -> 'accum) -> 'accum
 (** fold over all the nodes of a procedure *)
 
-val fold_slope_range : Node.t -> Node.t -> init:'accum -> f:('accum -> Node.t -> 'accum) -> 'accum
-(** fold between two nodes or until we reach a branching structure *)
-
 val set_succs : Node.t -> normal:Node.t list option -> exn:Node.t list option -> unit
 (** Set the successor nodes and exception nodes, if given, and update predecessor links *)
 
@@ -359,11 +367,9 @@ val pp_signature : Format.formatter -> t -> unit
 val pp_local : Format.formatter -> ProcAttributes.var_data -> unit
 
 val pp_with_instrs : ?print_types:bool -> Format.formatter -> t -> unit
-  [@@warning "-unused-value-declaration"]
+[@@warning "-unused-value-declaration"]
 
 val is_specialized : t -> bool
-
-val is_kotlin : t -> bool
 
 val is_captured_pvar : t -> Pvar.t -> bool
 (** true if pvar is a captured variable of a cpp lambda or obcj block *)
@@ -372,8 +378,6 @@ val is_captured_var : t -> Var.t -> bool
 (** true if var is a captured variable of a cpp lambda or obcj block *)
 
 val has_modify_in_block_attr : t -> Pvar.t -> bool
-
-val deep_copy_code_from_pdesc : orig_pdesc:t -> dest_pdesc:t -> unit
 
 val size : t -> int
 (** Return number of nodes, plus number of instructions (in nodes), plus number of edges (between

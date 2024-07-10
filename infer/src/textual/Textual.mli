@@ -47,7 +47,12 @@ end
 
 module ProcName : NAME (* procedure names, without their attachement type *)
 
-module VarName : NAME (* variables names *)
+module VarName : sig
+  (* variables names *)
+  include NAME
+
+  val is_hack_reified_generics_param : t -> bool
+end
 
 module FieldName : NAME (* field names, without their enclosing types *)
 
@@ -58,6 +63,8 @@ module NodeName : NAME (* node names, also called labels *)
 module TypeName : sig
   (* structured value type name *)
   include NAME
+
+  val hack_generics : t
 
   val wildcard : t
 end
@@ -97,7 +104,15 @@ module Attr : sig
 
   val is_async : t -> bool
 
+  val is_abstract : t -> bool
+
+  val is_alias : t -> bool
+
+  val is_hack_wrapper : t -> bool
+
   val is_final : t -> bool
+
+  val is_notnull : t -> bool
 
   val is_static : t -> bool
 
@@ -187,7 +202,11 @@ module ProcSig : sig
 
   val to_qualified_procname : t -> QualifiedProcName.t
 
+  val arity : t -> int option
+
   val incr_arity : t -> t
+
+  val decr_arity : t -> int -> t
 
   val is_hack_init : t -> bool
 
@@ -220,6 +239,8 @@ module ProcDecl : sig
   val to_binop : QualifiedProcName.t -> Binop.t option
 
   val is_cast_builtin : QualifiedProcName.t -> bool
+
+  val is_generics_constructor_builtin : QualifiedProcName.t -> bool
 
   val is_instanceof_builtin : QualifiedProcName.t -> bool
 
@@ -260,7 +281,7 @@ module Exp : sig
     | Load of {exp: t; typ: Typ.t option}
     | Lvar of VarName.t  (** the address of a program variable *)
     | Field of {exp: t; field: qualified_fieldname}  (** field offset *)
-    | Index of t * t  (** an array index offset: [exp1\[exp2\]] *)
+    | Index of t * t  (** an array index offset: [exp1[exp2]] *)
     | Const of Const.t
     | Call of {proc: QualifiedProcName.t; args: t list; kind: call_kind}
     | Closure of {proc: QualifiedProcName.t; captured: t list; params: VarName.t list}

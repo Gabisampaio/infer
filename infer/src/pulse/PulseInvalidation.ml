@@ -183,6 +183,18 @@ let describe f cause =
       F.fprintf f "was potentially invalidated by `%a::%a`" pp_map_type map_t pp_map_function map_f
 
 
+let suggest cause =
+  match cause with
+  | CppMap (_, OperatorBracket) ->
+      Some
+        "`operator[]` inserts when the key is not present, which can easily lead to unsafe code. \
+         Use `.at` if the key is known to be in the map. If not, decomposing the expression, \
+         performing another lookup, or using different map methods are common ways to fix and/or \
+         improve the code."
+  | _ ->
+      None
+
+
 let pp f invalidation =
   match invalidation with
   | CFree ->

@@ -65,10 +65,11 @@ module InstrBasicCostWithReason = struct
       | Some callee_cost when not (Procname.is_hack_builtins callee_pname) ->
           callee_cost
       | _ ->
-          ScubaLogging.cost_log_message ~label:"unmodeled_function_operation_cost"
-            ~message:
-              (F.asprintf "[Operation Cost] Unmodeled Function: %a" Procname.pp_without_templates
-                 callee_pname ) ;
+          if Config.cost_log_unknown_calls then
+            ScubaLogging.log_message ~label:"unmodeled_function_operation_cost"
+              ~message:
+                (F.asprintf "[Operation Cost] Unmodeled Function: %a" Procname.pp_without_templates
+                   callee_pname ) ;
           BasicCostWithReason.one )
 
 
@@ -205,13 +206,13 @@ module InstrBasicCostWithReason = struct
 end
 
 let compute_errlog_extras cost =
-  Jsonbug_t.
-    { cost_polynomial= Some (Format.asprintf "%a" BasicCostWithReason.pp_hum cost)
-    ; cost_degree= BasicCostWithReason.degree cost |> Option.map ~f:Polynomials.Degree.encode_to_int
-    ; nullsafe_extra= None
-    ; copy_type= None
-    ; config_usage_extra= None
-    ; taint_extra= None }
+  { Jsonbug_t.cost_polynomial= Some (Format.asprintf "%a" BasicCostWithReason.pp_hum cost)
+  ; cost_degree= BasicCostWithReason.degree cost |> Option.map ~f:Polynomials.Degree.encode_to_int
+  ; copy_type= None
+  ; config_usage_extra= None
+  ; taint_extra= None
+  ; transitive_callees= []
+  ; transitive_missed_captures= [] }
 
 
 (** Calculate the final Worst Case Cost of the cfg. It is the dot product of the symbolic cost of
@@ -240,9 +241,11 @@ module WorstCaseCost = struct
           CostDomain.plus acc cost )
     in
     Option.iter (CostDomain.get_operation_cost cost).top_pname_opt ~f:(fun top_pname ->
-        ScubaLogging.cost_log_message ~label:"unmodeled_function_top_cost"
-          ~message:
-            (F.asprintf "[Top Cost] Unmodeled Function: %a" Procname.pp_without_templates top_pname) ) ;
+        if Config.cost_log_unknown_calls then
+          ScubaLogging.log_message ~label:"unmodeled_function_top_cost"
+            ~message:
+              (F.asprintf "[Top Cost] Unmodeled Function: %a" Procname.pp_without_templates
+                 top_pname ) ) ;
     cost
 end
 
@@ -279,16 +282,16 @@ module Check = struct
     if not (is_report_suppressed pname) then
       CostIssues.CostKindMap.iter2 CostIssues.enabled_cost_map cost
         ~f:(fun
-             _kind
-             CostIssues.
-               { name
-               ; unreachable_issue
-               ; infinite_issue
-               ; expensive_issue
-               ; top_and_unreachable
-               ; expensive }
-             cost
-           ->
+            _kind
+            CostIssues.
+              { name
+              ; unreachable_issue
+              ; infinite_issue
+              ; expensive_issue
+              ; top_and_unreachable
+              ; expensive }
+            cost
+          ->
           let report = mk_report proc_desc pname err_log (Procdesc.get_loc proc_desc) ~name cost in
           if top_and_unreachable then
             report_top_and_unreachable ~report ~unreachable_issue ~infinite_issue cost ;
@@ -313,7 +316,7 @@ let compute_bound_map tenv proc_desc node_cfg inferbo_invariant_map analyze_depe
   in
   let loop_inv_map =
     let get_callee_purity callee_pname =
-      match analyze_dependency callee_pname with Some (_, _, purity) -> purity | _ -> None
+      match analyze_dependency callee_pname with Ok (_, _, purity) -> purity | Error _ -> None
     in
     LoopInvariant.get_loop_inv_var_map tenv get_callee_purity reaching_defs_invariant_map
       loop_head_to_loop_nodes
@@ -355,7 +358,7 @@ let checker ({InterproceduralAnalysis.proc_desc; exe_env; analyze_dependency; te
   let integer_type_widths = Exe_env.get_integer_type_widths exe_env proc_name in
   let+ inferbo_invariant_map =
     BufferOverrunAnalysis.cached_compute_invariant_map
-      (InterproceduralAnalysis.bind_payload ~f:snd3 analysis_data)
+      (InterproceduralAnalysis.bind_payload_opt ~f:snd3 analysis_data)
   in
   let node_cfg = NodeCFG.from_pdesc proc_desc in
   (* given the semantics computes the upper bound on the number of times a node could be executed *)
@@ -368,11 +371,15 @@ let checker ({InterproceduralAnalysis.proc_desc; exe_env; analyze_dependency; te
   let get_node_nb_exec = compute_get_node_nb_exec node_cfg bound_map in
   let astate =
     let get_summary callee_pname =
-      let* cost_summary, _inferbo_summary, _ = analyze_dependency callee_pname in
+      let* cost_summary, _inferbo_summary, _ =
+        analyze_dependency callee_pname |> AnalysisResult.to_option
+      in
       cost_summary
     in
     let inferbo_get_summary callee_pname =
-      let* _cost_summary, inferbo_summary, _ = analyze_dependency callee_pname in
+      let* _cost_summary, inferbo_summary, _ =
+        analyze_dependency callee_pname |> AnalysisResult.to_option
+      in
       inferbo_summary
     in
     let get_formals callee_pname =

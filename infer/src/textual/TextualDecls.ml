@@ -18,6 +18,13 @@ module ProcEntry = struct
   let desc = function Decl _ -> None | Desc p -> Some p
 
   let signature t lang = ProcDecl.to_sig (decl t) lang
+
+  let remove_formals_types = function
+    | Decl pdecl ->
+        Decl {pdecl with formals_types= None}
+    | Desc pdesc ->
+        let procdecl = {pdesc.procdecl with formals_types= None} in
+        Desc {pdesc with procdecl}
 end
 
 type t =
@@ -35,6 +42,27 @@ let init sourcefile lang =
   ; structs= TypeName.Hashtbl.create 17
   ; sourcefile
   ; lang }
+
+
+let pp_seq pp_item fmt seq =
+  F.fprintf fmt "@[<v>" ;
+  Seq.iter (fun item -> F.fprintf fmt "@;%a" pp_item item) seq ;
+  F.fprintf fmt "@]"
+
+
+let pp fmt {globals; procs; variadic_procs; structs; sourcefile; lang} =
+  F.fprintf fmt
+    "@[<v>@;globals=%a@;procs=%a@;variadic_procs=%a@;structs=%a@;sourcefile=%a@;lang=%s@]"
+    (pp_seq VarName.pp)
+    (VarName.Hashtbl.to_seq_keys globals)
+    (pp_seq ProcSig.pp)
+    (ProcSig.Hashtbl.to_seq_keys procs)
+    (pp_seq QualifiedProcName.pp)
+    (QualifiedProcName.Hashtbl.to_seq_keys variadic_procs)
+    (pp_seq TypeName.pp)
+    (TypeName.Hashtbl.to_seq_keys structs)
+    SourceFile.pp sourcefile
+    (Option.value_map lang ~default:"none" ~f:Lang.to_string)
 
 
 type error =
@@ -86,10 +114,25 @@ let declare_variadic_proc_if_necessary decls = function
       ()
 
 
+(* every declared/implemented function is also given a default proc entry without
+   formals types. This is useful to avoid capture errors with variadic function and/or
+   splated arguments. *)
+let declare_default_if_necessary decls proc =
+  let procsig = ProcEntry.signature proc decls.lang in
+  match procsig with
+  | ProcSig.Hack {qualified_name; arity= Some _} ->
+      let procsig_default = ProcSig.Hack {qualified_name; arity= None} in
+      if not (ProcSig.Hashtbl.mem decls.procs procsig_default) then
+        ProcSig.Hashtbl.add decls.procs procsig_default (ProcEntry.remove_formals_types proc)
+  | _ ->
+      ()
+
+
 let declare_proc decls (proc : ProcEntry.t) =
   let procsig = ProcEntry.signature proc decls.lang in
   let existing_proc = ProcSig.Hashtbl.find_opt decls.procs procsig in
   declare_variadic_proc_if_necessary decls proc ;
+  declare_default_if_necessary decls proc ;
   match (existing_proc, proc) with
   | Some (Desc _), Decl _ ->
       ()
@@ -145,6 +188,8 @@ let get_variadic_procdesc decls qualified_procname =
 
 type variadic_status = NotVariadic | Variadic of Typ.t
 
+type generics_status = Reified | NotReified
+
 let get_struct decls tname = TypeName.Hashtbl.find_opt decls.structs tname
 
 let is_defined_in_a_trait decls_env {Textual.QualifiedProcName.enclosing_class} =
@@ -164,21 +209,37 @@ let is_trait_method decls_env procsig =
   not (Textual.ProcSig.is_hack_init procsig)
 
 
-let get_procdecl decls procsig =
+let get_procdecl decls procsig nb_args =
   let procname = ProcSig.to_qualified_procname procsig in
+  (* The trait methods has an additional parameter added by [hackc]. *)
+  let procsig =
+    if is_trait_method decls procsig then Textual.ProcSig.incr_arity procsig else procsig
+  in
+  let generics_status procdesc =
+    (* TODO(dpichardie) ask hackc to put an annotation on the function signature instead *)
+    if List.exists procdesc.ProcDesc.params ~f:VarName.is_hack_reified_generics_param then Reified
+    else NotReified
+  in
+  let non_variadic_case =
+    get_procentry decls procsig
+    |> Option.map ~f:(fun entry ->
+           let generics_status =
+             ProcEntry.desc entry |> Option.value_map ~default:Reified ~f:generics_status
+           in
+           (NotVariadic, generics_status, ProcEntry.decl entry) )
+  in
   match get_variadic_procdesc decls procname with
   | Some procdesc ->
       let formals_type = ProcDesc.formals procdesc in
       let variadic_type = List.last_exn formals_type in
       (* get_variadic_procdesc will only succeed for non empty param list *)
-      Some (Variadic variadic_type.typ, procdesc.procdecl)
+      if nb_args + 1 < List.length formals_type then
+        (* at call site there is not enough argument to activate the variadic argument,
+           then our last chance to succeed is the non-variadic case *)
+        non_variadic_case
+      else Some (Variadic variadic_type.typ, generics_status procdesc, procdesc.procdecl)
   | None ->
-      (* The trait methods has an additional parameter added by [hackc]. *)
-      let procsig =
-        if is_trait_method decls procsig then Textual.ProcSig.incr_arity procsig else procsig
-      in
-      get_procentry decls procsig
-      |> Option.map ~f:(fun entry -> (NotVariadic, ProcEntry.decl entry))
+      non_variadic_case
 
 
 let get_procdesc decls procsig =

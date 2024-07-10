@@ -23,8 +23,8 @@ type t =
   | Hash
   | LineOffset
   | QualifierContainsPotentialExceptionNote
-  | NullsafeExtra
   | TaintExtra
+  | TransitiveCalleesExtra
 [@@deriving equal]
 
 val all_symbols : (string * t) list

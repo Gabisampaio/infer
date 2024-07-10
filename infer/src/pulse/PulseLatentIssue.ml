@@ -40,7 +40,6 @@ let add_call_to_access_to_invalid_address (call_event, location) (call_subst, hi
 type t =
   | AccessToInvalidAddress of Diagnostic.access_to_invalid_address
   | ErlangError of Diagnostic.ErlangError.t
-  | ReadUninitializedValue of Diagnostic.ReadUninitialized.t
 [@@deriving compare, equal, yojson_of]
 
 let to_diagnostic = function
@@ -48,8 +47,6 @@ let to_diagnostic = function
       Diagnostic.AccessToInvalidAddress access_to_invalid_address
   | ErlangError erlang_error ->
       Diagnostic.ErlangError erlang_error
-  | ReadUninitializedValue read_uninitialized ->
-      Diagnostic.ReadUninitialized read_uninitialized
 
 
 let pp fmt latent_issue = Diagnostic.pp fmt (to_diagnostic latent_issue)
@@ -59,6 +56,8 @@ let add_call_to_calling_context call_and_loc = function
       AccessToInvalidAddress {access with calling_context= call_and_loc :: access.calling_context}
   | ErlangError (Badarg {calling_context; location}) ->
       ErlangError (Badarg {calling_context= call_and_loc :: calling_context; location})
+  | ErlangError (Badgenerator {calling_context; location}) ->
+      ErlangError (Badgenerator {calling_context= call_and_loc :: calling_context; location})
   | ErlangError (Badkey {calling_context; location}) ->
       ErlangError (Badkey {calling_context= call_and_loc :: calling_context; location})
   | ErlangError (Badmap {calling_context; location}) ->
@@ -71,14 +70,14 @@ let add_call_to_calling_context call_and_loc = function
       ErlangError (Badreturn {calling_context= call_and_loc :: calling_context; location})
   | ErlangError (Case_clause {calling_context; location}) ->
       ErlangError (Case_clause {calling_context= call_and_loc :: calling_context; location})
+  | ErlangError (Else_clause {calling_context; location}) ->
+      ErlangError (Else_clause {calling_context= call_and_loc :: calling_context; location})
   | ErlangError (Function_clause {calling_context; location}) ->
       ErlangError (Function_clause {calling_context= call_and_loc :: calling_context; location})
   | ErlangError (If_clause {calling_context; location}) ->
       ErlangError (If_clause {calling_context= call_and_loc :: calling_context; location})
   | ErlangError (Try_clause {calling_context; location}) ->
       ErlangError (Try_clause {calling_context= call_and_loc :: calling_context; location})
-  | ReadUninitializedValue read ->
-      ReadUninitializedValue {read with calling_context= call_and_loc :: read.calling_context}
 
 
 let add_call call_and_loc call_substs astate latent_issue =
@@ -102,10 +101,15 @@ let should_report (astate : AbductiveDomain.Summary.t) (diagnostic : Diagnostic.
   | ConfigUsage _
   | ConstRefableParameter _
   | CSharpResourceLeak _
+  | DynamicTypeMismatch _
   | JavaResourceLeak _
   | TransitiveAccess _
+  | HackCannotInstantiateAbstractClass _
   | HackUnawaitedAwaitable _
+  | HackUnfinishedBuilder _
   | MemoryLeak _
+  | MutualRecursionCycle _
+  | ReadUninitialized _
   | ReadonlySharedPtrParameter _
   | RetainCycle _
   | StackVariableAddressEscape _
@@ -119,6 +123,3 @@ let should_report (astate : AbductiveDomain.Summary.t) (diagnostic : Diagnostic.
       else `DelayReport (AccessToInvalidAddress latent)
   | ErlangError latent ->
       if PulseArithmetic.is_manifest astate then `ReportNow else `DelayReport (ErlangError latent)
-  | ReadUninitialized latent ->
-      if PulseArithmetic.is_manifest astate then `ReportNow
-      else `DelayReport (ReadUninitializedValue latent)

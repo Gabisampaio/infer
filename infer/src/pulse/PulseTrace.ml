@@ -19,10 +19,7 @@ let get_outer_location = function Immediate {location; _} | ViaCall {location; _
 
 let get_outer_history = function Immediate {history; _} | ViaCall {history; _} -> history
 
-(* NOTE: Does not currently try to find multiple cell ids in case of, eg, a binary operation forking
-   the history into two. Maybe histories should collect the set of cell ids that they depend on
-   instead of a single one. *)
-let get_cell_id trace = ValueHistory.get_cell_id (get_outer_history trace)
+let get_cell_ids trace = ValueHistory.get_cell_ids (get_outer_history trace)
 
 let get_start_location trace =
   match ValueHistory.get_first_main_event (get_outer_history trace) with
@@ -43,13 +40,41 @@ let rec pp ~pp_immediate fmt trace =
           (pp ~pp_immediate) in_call
 
 
+let rec pp_all fmt trace =
+  match trace with
+  | Immediate {location; history} ->
+      F.fprintf fmt "%a::(%a)" ValueHistory.pp history Location.pp location
+  | ViaCall {f; location; history; in_call} ->
+      F.fprintf fmt "%a::(%a)%a[%a]" ValueHistory.pp history CallEvent.pp f Location.pp location
+        pp_all in_call
+
+
+module Set = struct
+  module T = struct
+    type nonrec t = t
+
+    let compare = compare
+
+    let pp = pp_all
+  end
+
+  include PrettyPrintable.MakePPSet (T)
+
+  let map_callee call_event call_loc set =
+    map
+      (fun trace ->
+        ViaCall {f= call_event; location= call_loc; history= ValueHistory.epoch; in_call= trace} )
+      set
+end
+
 let add_call call_event location hist_map ~default_caller_history callee_trace =
   (* The callee->caller mapping is not a reliable source for histories because it makes all the
      access paths that point to the same value share the same caller history. This is why we try to
      refine this first guess using the cell id. *)
   let caller_history =
     let open Option.Monad_infix in
-    get_cell_id callee_trace >>= CellId.Map.find hist_map
+    get_cell_ids callee_trace
+    >>= ValueHistory.of_cell_ids_in_map hist_map
     |> Option.value ~default:default_caller_history
   in
   ViaCall {in_call= callee_trace; f= call_event; location; history= caller_history}
@@ -72,7 +97,8 @@ let rec add_to_errlog ?(include_value_history = true) ?(include_taint_events = f
             (F.asprintf "when calling %a here" CallEvent.pp f)
             []
           :: errlog )
-        @@ add_to_errlog ~include_value_history ~nesting:(nesting + 1) ~pp_immediate in_call
+        @@ add_to_errlog ~include_value_history ~include_taint_events ~nesting:(nesting + 1)
+             ~pp_immediate in_call
         @@ errlog
       in
       if include_value_history then

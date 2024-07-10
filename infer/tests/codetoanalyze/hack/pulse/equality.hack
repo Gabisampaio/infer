@@ -5,6 +5,8 @@
 
 namespace Equality;
 
+class A {}
+
 class CmpSame {
 
   public function cmpSameNullSimpleBad(): void {
@@ -54,6 +56,24 @@ class CmpSame {
   public function cmpSameIntSimpleGood(): void {
     $a = 0;
     $b = 1;
+    $taint = \Level1\taintSource();
+    if ($a === $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
+  public function cmpSameFloatSimpleBad(): void {
+    $a = 3.14;
+    $b = 3.14;
+    $taint = \Level1\taintSource();
+    if ($a === $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
+  public function cmpSameFloatSimpleGood(): void {
+    $a = 3.14;
+    $b = 42.0;
     $taint = \Level1\taintSource();
     if ($a === $b) {
       \Level1\taintSink($taint);
@@ -194,6 +214,24 @@ class CmpNsame {
     }
   }
 
+  public function nsameFloatSimpleBad(): void {
+    $a = 3.14;
+    $b = 42.0;
+    $taint = \Level1\taintSource();
+    if ($a !== $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
+  public function nsameFloatSimpleGood(): void {
+    $a = 3.14;
+    $b = 3.14;
+    $taint = \Level1\taintSource();
+    if ($a !== $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
   public function neBoolSimpleBad(): void {
     $a = true;
     $b = false;
@@ -304,6 +342,42 @@ class CmpEq {
     }
   }
 
+  public function cmpEqFloatSimpleBad(): void {
+    $a = 3.14;
+    $b = 3.14;
+    $taint = \Level1\taintSource();
+    if ($a == $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
+  public function cmpEqFloatSimpleGood(): void {
+    $a = 3.14;
+    $b = 42.0;
+    $taint = \Level1\taintSource();
+    if ($a == $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
+  public function neFloatSimpleBad(): void {
+    $a = 3.14;
+    $b = 42.0;
+    $taint = \Level1\taintSource();
+    if ($a != $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
+  public function neFloatSimpleGood(): void {
+    $a = 3.14;
+    $b = 3.14;
+    $taint = \Level1\taintSource();
+    if ($a != $b) {
+      \Level1\taintSink($taint);
+    }
+  }
+
   public function cmpEqBoolSimpleBad(): void {
     $a = true;
     $b = true;
@@ -313,7 +387,7 @@ class CmpEq {
     }
   }
 
-  public function FP_cmpEqBoolSimpleGood(): void {
+  public function cmpEqBoolSimpleGood(): void {
     $a = true;
     $b = false;
     $taint = \Level1\taintSource();
@@ -331,7 +405,7 @@ class CmpEq {
     }
   }
 
-  public function FP_neBoolSimpleGood(): void {
+  public function neBoolSimpleGood(): void {
     $a = true;
     $b = true;
     $taint = \Level1\taintSource();

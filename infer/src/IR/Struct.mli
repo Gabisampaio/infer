@@ -9,17 +9,32 @@
 open! IStd
 module F = Format
 
-type field = Fieldname.t * Typ.t * Annot.Item.t [@@deriving compare, equal]
+type objc_property_attribute = Copy | Strong | Weak [@@deriving compare, equal, hash, normalize]
 
-type fields = field list
+type field =
+  { name: Fieldname.t
+  ; typ: Typ.t
+  ; annot: Annot.Item.t
+  ; objc_property_attributes: objc_property_attribute list }
+[@@deriving compare, equal, hash, normalize]
+
+val mk_field :
+     ?annot:Annot.Item.t
+  -> ?objc_property_attributes:objc_property_attribute list
+  -> Fieldname.t
+  -> Typ.t
+  -> field
+
+val field_has_weak : field -> bool
 
 type java_class_kind = Interface | AbstractClass | NormalClass [@@deriving equal]
 
-type hack_class_kind = Class | Interface | Trait
+type hack_class_kind = Class | AbstractClass | Interface | Trait | Alias
 
 module ClassInfo : sig
   type t =
     | NoInfo
+    | CppClassInfo of {is_trivially_copyable: bool}  (** class kind in C++ *)
     | JavaClassInfo of
         { kind: java_class_kind  (** class kind in Java *)
         ; loc: Location.t option
@@ -31,8 +46,8 @@ end
 
 (** Type for a structured value. *)
 type t = private
-  { fields: fields  (** non-static fields *)
-  ; statics: fields  (** static fields *)
+  { fields: field list  (** non-static fields *)
+  ; statics: field list  (** static fields *)
   ; supers: Typ.Name.t list  (** superclasses *)
   ; objc_protocols: Typ.Name.t list  (** ObjC protocols *)
   ; methods: Procname.t list  (** methods defined *)
@@ -41,6 +56,7 @@ type t = private
   ; class_info: ClassInfo.t  (** present if and only if the class is Java or Hack *)
   ; dummy: bool  (** dummy struct for class including static method *)
   ; source_file: SourceFile.t option  (** source file containing this struct's declaration *) }
+[@@deriving normalize]
 
 type lookup = Typ.Name.t -> t option
 
@@ -51,8 +67,8 @@ val pp : Pp.env -> Typ.Name.t -> F.formatter -> t -> unit
 
 val internal_mk_struct :
      ?default:t
-  -> ?fields:fields
-  -> ?statics:fields
+  -> ?fields:field list
+  -> ?statics:field list
   -> ?methods:Procname.t list
   -> ?exported_objc_methods:Procname.t list
   -> ?supers:Typ.Name.t list
@@ -95,8 +111,10 @@ val get_source_file : t -> SourceFile.t option
 
 val is_hack_class : t -> bool
 
+val is_hack_abstract_class : t -> bool
+
+val is_hack_alias : t -> bool [@@warning "-unused-value-declaration"]
+
 val is_hack_interface : t -> bool
 
 val is_hack_trait : t -> bool
-
-module Normalizer : HashNormalizer.S with type t = t

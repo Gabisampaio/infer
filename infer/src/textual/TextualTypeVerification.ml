@@ -45,7 +45,7 @@ let rec compat ~assigned:(t1 : Typ.t) ~given:(t2 : Typ.t) =
       false
 
 
-let is_ptr = function Typ.Ptr _ -> true | _ -> false
+let is_ptr = function Typ.Ptr _ -> true | Typ.Void -> true | _ -> false
 
 let is_ptr_struct = function Typ.Ptr (Struct _) | Typ.Void -> true | _ -> false
 
@@ -83,7 +83,7 @@ type error =
   | IdentAssignedTwice of {id: Ident.t; typ1: Typ.t; typ2: Typ.t; loc1: Location.t; loc2: Location.t}
   | IdentReadBeforeWrite of {id: Ident.t; loc: Location.t}
   | VarTypeNotDeclared of {var: VarName.t; loc: Location.t}
-  | MissingDeclaration of {proc: QualifiedProcName.t; loc: Location.t}
+  | MissingDeclaration of {procsig: ProcSig.t; loc: Location.t}
   | ArityMismatch of {length1: int; length2: int; loc: Location.t}
 
 let error_loc = function
@@ -123,8 +123,11 @@ let pp_error sourcefile fmt error =
       F.fprintf fmt "ident %a is read before being written" Ident.pp id
   | VarTypeNotDeclared {var; _} ->
       F.fprintf fmt "variable %a has not been declared" VarName.pp var
-  | MissingDeclaration {proc} ->
-      F.fprintf fmt "procname %a should be user-declared or a builtin" QualifiedProcName.pp proc
+  | MissingDeclaration {procsig} ->
+      let proc = ProcSig.to_qualified_procname procsig in
+      F.fprintf fmt "procname %a %tshould be user-declared or a builtin" QualifiedProcName.pp proc
+        (fun fmt ->
+          ProcSig.arity procsig |> Option.iter ~f:(fun n -> F.fprintf fmt "with arity %d " n) )
   | ArityMismatch {length1; length2; loc} ->
       F.fprintf fmt "iter2 was run on lists of different lengths at %a: %d vs %d" Location.pp loc
         length1 length2
@@ -157,10 +160,11 @@ let mk_type_mismatch_error expected loc exp typ : error =
   TypeMismatch {exp; typ; expected; loc}
 
 
-let mk_missing_declaration_error (proc : QualifiedProcName.t) : error =
+let mk_missing_declaration_error procsig : error =
+  let proc = ProcSig.to_qualified_procname procsig in
   let name = QualifiedProcName.name proc in
   let {ProcName.loc} = name in
-  MissingDeclaration {proc; loc}
+  MissingDeclaration {procsig; loc}
 
 
 (** state + error monad *)
@@ -225,19 +229,20 @@ let get_result_type : Typ.t monad = fun state -> (Value state.pdesc.procdecl.res
 
 let get_lang : Lang.t option monad = fun state -> (Value (TextualDecls.lang state.decls), state)
 
-let fold (l : 'a list) ~(init : 'acc monad) ~(f : 'acc -> 'a -> 'acc monad) : 'acc monad =
-  List.fold l ~init ~f:(fun monad a ->
-      let* acc = monad in
-      f acc a )
+let rec fold (l : 'a list) ~(init : 'acc) ~(f : 'acc -> 'a -> 'acc monad) : 'acc monad =
+ fun astate ->
+  match l with
+  | [] ->
+      ret init astate
+  | x :: xs ->
+      bind (f init x) (fun init -> (fold [@tailcall]) xs ~init ~f) astate
 
 
-let iter (l : 'a list) ~(f : 'a -> unit monad) : unit monad =
-  fold l ~init:(ret ()) ~f:(fun () a -> f a)
-
+let iter (l : 'a list) ~(f : 'a -> unit monad) : unit monad = fold l ~init:() ~f:(fun () a -> f a)
 
 let mapM (l : 'a list) ~(f : 'a -> 'b monad) : 'b list monad =
   let+ rev_res =
-    fold l ~init:(ret []) ~f:(fun l a ->
+    fold l ~init:[] ~f:(fun l a ->
         let+ b = f a in
         b :: l )
   in
@@ -360,29 +365,59 @@ let typeof_const (const : Const.t) : Typ.t =
       Float
 
 
-let typeof_reserved_proc (proc : QualifiedProcName.t) =
+let typeof_reserved_proc procsig args =
+  let proc = ProcSig.to_qualified_procname procsig in
   if ProcDecl.to_binop proc |> Option.is_some then
-    ret (Typ.Int, Some [Typ.Int; Typ.Int], TextualDecls.NotVariadic)
+    ret (Typ.Int, Some [Typ.Int; Typ.Int], TextualDecls.NotVariadic, procsig, args)
   else if ProcDecl.to_unop proc |> Option.is_some then
-    ret (Typ.Int, Some [Typ.Int], TextualDecls.NotVariadic)
+    ret (Typ.Int, Some [Typ.Int], TextualDecls.NotVariadic, procsig, args)
   else
-    let* () = add_error (mk_missing_declaration_error proc) in
+    let* () = add_error (mk_missing_declaration_error procsig) in
     abort
 
 
+let typeof_generics = Typ.Ptr (Typ.Struct TypeName.hack_generics)
+
+let count_generics_args args : int monad =
+  fold args ~init:0 ~f:(fun count exp ->
+      match exp with
+      | Exp.Var id ->
+          let+ typ, _ = typeof_ident id in
+          if Typ.equal typ typeof_generics then 1 + count else count
+      | _ ->
+          ret count )
+
+
 (* Since procname can be both defined and declared in a file we should account for unknown formals in declarations. *)
-let typeof_procname (procsig : ProcSig.t) state =
-  match TextualDecls.get_procdecl state.decls procsig with
-  | Some (variadic_status, procdecl) ->
+let rec typeof_procname (procsig : ProcSig.t) args nb_generics state =
+  let nb_args = List.length args in
+  (* first attempt where the arity takes into account the generics args *)
+  match TextualDecls.get_procdecl state.decls procsig nb_args with
+  | Some (variadic_status, generics_status, procdecl) -> (
       let formals_types =
         procdecl.formals_types
         |> Option.map ~f:(fun formals_types -> List.map formals_types ~f:(fun {Typ.typ} -> typ))
       in
-      ret (procdecl.result_type.typ, formals_types, variadic_status) state
+      match generics_status with
+      | NotReified when nb_generics > 0 ->
+          (* we found an implementation but we should not have used this arity *)
+          let procsig = ProcSig.decr_arity procsig nb_generics in
+          (* we expect the generics arguments to be the last ones *)
+          let args = List.take args (nb_args - nb_generics) in
+          (* second and last attempt where the arity does not take into account the generics args *)
+          typeof_procname procsig args 0 state
+      | _ ->
+          ret (procdecl.result_type.typ, formals_types, variadic_status, procsig, args) state )
   | None when ProcSig.to_qualified_procname procsig |> QualifiedProcName.contains_wildcard ->
-      ret (Typ.Void, None, TextualDecls.NotVariadic) state
+      ret (Typ.Void, None, TextualDecls.NotVariadic, procsig, args) state
+  | None when nb_generics > 0 ->
+      (* second and last attempt where the arity does not take into account the generics args *)
+      let procsig = ProcSig.decr_arity procsig nb_generics in
+      (* we expect the generics arguments to be the last ones *)
+      let args = List.take args (nb_args - nb_generics) in
+      typeof_procname procsig args 0 state
   | None ->
-      typeof_reserved_proc (ProcSig.to_qualified_procname procsig) state
+      typeof_reserved_proc procsig args state
 
 
 (* In all the typecheck/typeof function below, when typechecking/type-computation succeeds
@@ -459,10 +494,17 @@ and typeof_exp (exp : Exp.t) : (Exp.t * Typ.t) monad =
       typeof_cast_builtin proc args
   | Call {proc; args} when ProcDecl.is_instanceof_builtin proc ->
       typeof_instanceof_builtin proc args
+  | Call {proc} when ProcDecl.is_generics_constructor_builtin proc ->
+      (* TODO(T177210383): fix the type declared by hackc in order to deal with
+         this case as a regular call *)
+      ret (exp, typeof_generics)
   | Call {proc; args; kind} ->
       let* lang = get_lang in
       let procsig = Exp.call_sig proc (List.length args) lang in
-      let* result_type, formals_types, is_variadic = typeof_procname procsig in
+      let* nb_generics = count_generics_args args in
+      let* result_type, formals_types, is_variadic, procsig, args =
+        typeof_procname procsig args nb_generics
+      in
       let* loc = get_location in
       let+ args =
         match formals_types with
@@ -574,6 +616,11 @@ and typeof_instanceof_builtin (proc : QualifiedProcName.t) args =
   | [exp1; (Exp.Typ _ as exp2)] ->
       let+ exp1, _ = typeof_exp exp1 in
       (Exp.Call {proc; args= [exp1; exp2]; kind= Exp.NonVirtual}, Typ.Int)
+  (* hack to temporarily let instanceof take 2 or 3 arguments last should be int by the way *)
+  | [exp1; (Exp.Typ _ as exp2); exp3] ->
+      let* exp1, _ = typeof_exp exp1 in
+      let+ exp3, _ = typeof_exp exp3 in
+      (Exp.Call {proc; args= [exp1; exp2; exp3]; kind= Exp.NonVirtual}, Typ.Int)
   | [_; exp] ->
       let* loc = get_location in
       let* _, typ = typeof_exp exp in

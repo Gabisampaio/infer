@@ -23,7 +23,10 @@ let make_fresh_id_generator () =
 
 
 let unknown name json =
-  L.debug Capture Verbose "ErlangAst.Parse: unknown %s: %s@." name (Yojson.Safe.show json) ;
+  L.debug Capture Verbose
+    "ErlangJsonParser: parsing not supported for %s, likely causing the entire tree to be skipped: \
+     %s@."
+    name (Yojson.Safe.show json) ;
   None
 
 
@@ -317,6 +320,20 @@ let rec to_expression (gen_uniq : unit -> int) json : Ast.expression option =
       let* pattern = to_expression gen_uniq pattern in
       let* body = to_expression gen_uniq body in
       expr loc (Match {pattern; body})
+  | `List [`String "maybe"; anno; body] ->
+      let* loc = get_loc_from_anno anno in
+      let* body = to_body gen_uniq body in
+      expr loc (Maybe {body; else_cases= []})
+  | `List [`String "maybe"; anno; body; `List [`String "else"; _anno; else_cases]] ->
+      let* loc = get_loc_from_anno anno in
+      let* body = to_body gen_uniq body in
+      let* else_cases = to_list ~f:(to_case_clause gen_uniq) else_cases in
+      expr loc (Maybe {body; else_cases})
+  | `List [`String "maybe_match"; anno; pattern; body] ->
+      let* loc = get_loc_from_anno anno in
+      let* pattern = to_expression gen_uniq pattern in
+      let* body = to_expression gen_uniq body in
+      expr loc (MaybeMatch {pattern; body})
   | `List [`String "mc"; anno; association; qualifiers] ->
       let* loc = get_loc_from_anno anno in
       let* expression = to_association gen_uniq association in

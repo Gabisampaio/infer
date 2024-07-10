@@ -93,6 +93,19 @@ module Import = struct
         List.map (f y) ~f:(fun result -> PulseResult.append_errors errors result)
 
 
+  let bind_sat_result non_disj x f =
+    match x with
+    | Unsat ->
+        ([], non_disj)
+    | Sat (FatalError _ as err) ->
+        ([err], non_disj)
+    | Sat (Ok y) ->
+        f y
+    | Sat (Recoverable (y, errors)) ->
+        let execs, non_disj = f y in
+        (List.map execs ~f:(fun result -> PulseResult.append_errors errors result), non_disj)
+
+
   let ( let<+> ) x f : _ PulseResult.t list =
     match (x : _ PulseResult.t) with
     | FatalError _ as err ->
@@ -128,12 +141,16 @@ module Import = struct
         ; address: DecompilerExpr.t
         ; must_be_valid: Trace.t * Invalidation.must_be_valid_reason option
         ; calling_context: (CallEvent.t * Location.t) list }
+    | LatentSpecializedTypeIssue of
+        {astate: AbductiveDomain.Summary.t; specialized_type: Typ.Name.t; trace: Trace.t}
 
   type base_error = AccessResult.error =
     | PotentialInvalidAccess of
         { astate: AbductiveDomain.t
         ; address: DecompilerExpr.t
         ; must_be_valid: Trace.t * Invalidation.must_be_valid_reason option }
+    | PotentialInvalidSpecializedCall of
+        {astate: AbductiveDomain.t; specialized_type: Typ.Name.t; trace: Trace.t}
     | ReportableError of {astate: AbductiveDomain.t; diagnostic: Diagnostic.t}
     | WithSummary of base_error * AbductiveDomain.Summary.t
 end
